@@ -1,0 +1,453 @@
+#!/usr/bin/env bash
+# ================================================================
+# -*- mode: bash -*-
+# vi: set ft=sh
+# ****************************************************************
+#
+# DESCRIPTION
+#    Manage swarm machines
+#
+# SYNTAX & EXAMPLES
+#    See 'SYNTAX' (below)
+#
+# ----------------------------------------------------------------
+# IMPLEMENTATION
+#    version         script 0.0.4
+#    author          Greg Milligan
+#    copyright       Copyright (c) 2017 http://www.xybersolve.com
+#    license         GNU General Public License
+#
+# ================================================================
+#  DEBUG OPTION
+#    set -n  # Uncomment to check your syntax, without execution.
+#    set -x  # Uncomment to debug this shell script
+#
+# ---------------------------------------------------------------
+#
+# TODO:
+# ****************************************************************
+
+
+# ---------------------------------------
+# CONFIGFURATION
+# ---------------------------------------
+# strict environment
+set -o errexit  # exit on command error status
+set -o nounset  # no unreadonlyd variables
+set -o pipefail # failr on pipe failures
+trap 'echo "Aborting due to errexit on line $LINENO. Exit code: ${?}" >&2' ERR
+
+# ---------------------------------------
+# GLOBAL VARIABLES
+# ---------------------------------------
+# booleans
+declare -ir TRUE=1
+declare -ir FALSE=0
+
+# script info
+declare -r PROGNAME="$(basename ${0})"
+declare -r VERSION=0.0.1
+declare -r SUBJECT=""
+declare -r KEYS=""
+declare -ri MIN_ARG_COUNT=1
+declare -r SYNTAX=$(cat <<EOF
+
+    Script: ${PROGNAME}
+    Purpose:
+    Usage: ${PROGNAME} [options]
+
+    Options:
+      --help:  help and usage
+      --version: show version info
+
+      --create-all=<type>: Create docker host machines
+
+      --start=mgr1: Start a machine
+      --start-all: Start all machine defined in config file
+      --restart-all: start and generate certs for all swarm machines
+
+      --stop=<node name>: Stop docker host machines
+      --stop-all: stop all machines in the swarm
+
+      --remove=<node name>: Remove docker host machines
+      --remove-all: Remove docker host machines
+
+      --delete=<node name>: Delete a node
+      --delete-all: Delete all nodes in the swarm
+
+      --gen-certs=<machine name>: regenerate swarm certificates for machine
+      --gen-certs-all: regenerate all swarm certificates
+      --ips: show ips of the swarm machines
+
+    Examples:
+      ${PROGNAME} --create-all
+      ${PROGNAME} --create-all=aws
+      ${PROGNAME} --create-all=vbx
+      ${PROGNAME} --ls
+      ${PROGNAME} --start-mgr1
+      ${PROGNAME} --start-all
+      ${PROGNAME} --stop=swarm-wrk-03
+      ${PROGNAME} --stop-all
+      ${PROGNAME} --delete=swarm-wrk-02
+      ${PROGNAME} --delete-all
+      ${PROGNAME} --gen-certs-all
+      ${PROGNAME} --gen-certs=swarm-wrk-02
+EOF
+)
+# files & directories
+declare -r BIN_DIR=~/bin
+declare -r SCRIPT_DIR="$( dirname ${0} )"
+#declare -r CONFIG_FILE="${SCRIPT_DIR}/swarm.conf.sh"
+#declare -r CONFIG_FILE="${SCRIPT_DIR}/swarm.aws.conf.sh"
+
+# reads in machine specific conf file
+declare -r CONFIG_FILE="${SCRIPT_DIR}/swarm.conf.sh"
+declare -r COMMON_FILE="${SCRIPT_DIR}/swarm.common.sh"
+declare -r EC2_LIB_FILE="${SCRIPT_DIR}/ec2.sh"
+
+# actions
+declare -i CREATE=${FALSE}
+declare -i CREATE_ALL=${FALSE}
+declare -i START=${FALSE}
+declare -i START_ALL=${FALSE}
+declare -i RESTART_ALL=${FALSE}
+declare -i STOP=${FALSE}
+declare -i STOP_ALL=${FALSE}
+declare -i DELETE=${FALSE}
+declare -i DELETE_ALL=${FALSE}
+declare -i GEN_CERTS=${FALSE}
+declare -i GEN_CERTS_ALL=${FALSE}
+
+# ---------------------------------------
+# COMMON FUNCTIONS
+# ---------------------------------------
+usage() {
+  echo "${SYNTAX}"
+}
+
+error() {
+  printf "\n%s\n" "Error: ${1}"
+}
+
+die() {
+  error "${1}"
+  usage
+  printf "\n\n"
+  exit "${2:-1}"
+}
+
+show_version() {
+  printf "\n\n%s  %s\n\n\n" "${PROGNAME}" "${VERSION}"
+  exit 0
+}
+
+show_help() {
+  printf "\n\n"
+  usage
+  printf "\n\n"
+  exit 0
+}
+
+# ---------------------------------------
+# MAIN ROUTINES
+# ---------------------------------------
+source "${CONFIG_FILE}" \
+  || die "Unable to load config file: ${CONFIG_FILE}" 1
+
+# defined in swarm.conf.sh
+declare -r MACHINE_CONFIG_FILE=${SCRIPT_DIR}/swarm.${MACHINE_TYPE_TO_USE}.conf.sh
+source "${MACHINE_CONFIG_FILE}" \
+  && echo "Loaded machine config file: ${MACHINE_CONFIG_FILE}" \
+  || die "Unable to load config file: ${MACHINE_CONFIG_FILE}" 1
+
+source "${COMMON_FILE}" \
+  || die "Unable to load common script file: ${COMMON_FILE}" 2
+
+source "${EC2_LIB_FILE}" \
+  || die "Unable to load EC2 lib script file: ${EC2_LIB_FILE}" 3
+
+#*********************************
+# Machine Routines
+#
+__check_machine_name() {
+  local func=${1:-'unknown'}
+  [[ -z "${MACHINE_NAME}" ]] && die "${func}: machine 'name' is required" 4
+}
+
+__create_network() {
+  __become
+  docker network create --driver=overlay --subnet=10.0.9.0/24
+}
+
+__create_all() {
+  for name in ${NAMES[@]} ; do
+    __create "${name}"
+  done
+}
+
+__create() {
+  MACHINE_NAME=${1:-${MACHINE_NAME}}
+
+  __check_machine_name "__create"
+
+  [[ -z "${MACHINE_TYPE}" ]] \
+    && die "__create: machine type is required" 4
+
+  if [[ ${MACHINE_TYPE} == 'aws' ]]; then
+    VPC_ID=$( __get_vpc_id )
+    SUBNET_ID=$( __get_public_subnet_id )
+    IMAGE_ID=$( __get_image_id "${REGION}" "${OS}" )
+  fi
+
+  echo `Creating: ${MACHINE_NAME}, Type: ${MACHINE_TYPE}`
+
+  case "${MACHINE_TYPE}" in
+    aws) __create_aws_machine "${MACHINE_NAME}" ;;
+    vbx) __create_vbx_machine "${MACHINE_NAME}" ;;
+  esac
+}
+
+__create_vbx_machine() {
+  MACHINE_NAME="${1:-${MACHINE_NAME}}"
+  __check_machine_name "__create_vbx_machine"
+  # docker-machine create -d virtualbox "${MACHINE_NAME}"
+  docker-machine create \
+    --driver virtualbox \
+    --virtualbox-disk-size "60000" \
+    --virtualbox-memory "4096" \
+    --virtualbox-cpu-count "2" \
+    "${MACHINE_NAME}"
+
+}
+
+__check_aws() {
+  which aws &>/dev/null
+}
+
+__create_aws_machine() {
+  MACHINE_NAME="${1:-${MACHINE_NAME}}"
+  __check_machine_name "__create_aws_machine"
+  __check_aws || die "AWS is not avaiable" 5
+  # automatically creates keypair with name of machine
+  # delete previous instances
+  # __delete_key_pair "${MACHINE_NAME}"
+  # return 0 # debug
+  # minimal
+  # docker-machine create --driver amazonec2  --amazonec2-vpc-id "${VPC_ID}" --amazonec2-zone a aws01
+  # eval (docker-machine env aws01)
+
+  # only if from bastion/jump box
+  #--amazonec2-private-address-only \
+  docker-machine create \
+    --driver amazonec2 \
+    --amazonec2-region "${REGION}" \
+    --amazonec2-vpc-id "${VPC_ID}" \
+    --amazonec2-ami "${IMAGE_ID}" \
+    --amazonec2-instance-type "${INSTANCE_TYPE}" \
+    --amazonec2-zone "${ZONE}" \
+    --amazonec2-subnet-id "${SUBNET_ID}" \
+    --amazonec2-security-group "${SECURITY_GROUP}" \
+    --amazonec2-tags Name,${name},Type,swarm,Environment,production \
+    --amazonec2-root-size ${ROOT_SIZE} \
+    --amazonec2-ssh-user "${REMOTE_USER}" \
+    --amazonec2-keypair-name="${SSH_KEYPAIR}" \
+    --amazonec2-ssh-keypath "${SSH_KEYPATH}" \
+    "${MACHINE_NAME}"
+
+    #--amazonec2-use-private-address=true \
+}
+
+__list() {
+  docker-machine ls
+}
+
+__start_all() {
+  local name
+  # start all machine in swarm
+  for name in ${NAMES[@]}; do
+    __start "${name}"
+  done
+
+  # regenerate certificates for all machines in swarm
+  for name in ${NAMES[@]}; do
+    __gen_certs "${name}"
+  done
+}
+
+__start() {
+  MACHINE_NAME=${1:-${MACHINE_NAME}}
+  __check_machine_name "__start"
+  docker-machine start ${MACHINE_NAME}
+}
+
+# complte restart abnd certificate generation
+__restart_all() {
+  __start_all
+  __gen_certs_all
+}
+
+__clean() {
+  __stop_all
+}
+
+__stop_all() {
+  local name
+
+  __clean_client_env
+
+  for name in ${NAMES[@]}; do
+    __stop "${name}"
+  done
+}
+
+__stop() {
+  # NOTE: Digs deeper into node than it should, ie., swarm.nodes
+  MACHINE_NAME=${1:-${MACHINE_NAME}}
+  __check_machine_name "__stop"
+
+  __become
+  docker node update --availability drain "${MACHINE_NAME}" || true
+  docker-machine stop "${MACHINE_NAME}" || true
+}
+
+__delete_all() {
+  local name
+
+  __clean_client_env
+
+  for name in ${NAMES[@]}; do
+    __delete "${MACHINE_NAME}"
+  done
+}
+
+__delete() {
+  MACHINE_NAME=${1:-${MACHINE_NAME}}
+  __check_machine_name "__delete"
+  docker-machine rm "${MACHINE_NAME}"
+}
+
+__gen_certs_all() {
+  local name
+  for name in "${NAMES[@]}"; do
+    __gen_certs "${name}"
+  done
+}
+
+__gen_certs() {
+  MACHINE_NAME=${1:-${MACHINE_NAME}}
+  __check_machine_name "__gen_certs"
+  docker-machine regenerate-certs "${MACHINE_NAME}" --force
+}
+
+__ips() {
+  local name
+  local ip
+  for name in "${NAMES[@]}"; do
+    ip=$(docker-machine ip "${name}")
+    printf "%s: %s\n" "${name}" "${ip}"
+  done
+}
+
+__get_opts() {
+  while (( $# > 0 )); do
+    local arg="${1}"; shift;
+    case ${arg} in
+      --help)    show_help                ;;
+      --version) show_version             ;;
+      # machines
+      # TODO: Add AWS Nodes
+      --create-all)
+        CREATE_ALL=${TRUE}
+        [[ ${arg} =~ '=' ]] && MACHINE_TYPE="${arg#*=}"
+        ;;
+      --ls)
+        __list
+        exit 0
+        ;;
+      #--create-net*) CREATE_NETWORK=${TRUE}        ;;
+      --start-all)
+        START_ALL=${TRUE}
+        ;;
+      --start*)
+        START=${TRUE}
+        [[ ${arg} =~ '=' ]] && MACHINE_NAME="${arg#*=}"
+        ;;
+      --restart-all)
+        RESTART_ALL=${TRUE}
+        [[ ${arg} =~ '=' ]] && MACHINE_NAME="${arg#*=}"
+        ;;
+      --stop-all)
+        STOP_ALL=${TRUE}
+        ;;
+      --stop*)
+        STOP=${TRUE}
+        [[ ${arg} =~ '=' ]] && MACHINE_NAME="${arg#*=}"
+        ;;
+      --delete-all)
+        DELETE_ALL=${TRUE}
+        ;;
+      --delete*)
+        DELETE=${TRUE}
+        [[ ${arg} =~ '=' ]] && MACHINE_NAME="${arg#*=}"
+        ;;
+      --gen-certs-all)
+        GEN_CERTS_ALL=${TRUE}
+        ;;
+      --gen-certs*)
+        GEN_CERTS=${TRUE}
+        [[ ${arg} =~ '=' ]] && MACHINE_NAME="${arg#*=}"
+        ;;
+      --ips)
+        __ips
+        ;;
+      # TODO: name & size swarm nodes
+      --managers*)
+        [[ ${arg} =~ '=' ]] && MANAGERS="${arg#*=}"
+        ;;
+      --workers*)
+        [[ ${arg} =~ '=' ]] && WORKERS="${arg#*=}"
+        ;;
+      --name*) # --name=<node name>
+        [[ ${arg} =~ '=' ]] && MACHINE_NAME="${arg#*=}"
+        ;;
+
+      --prefix*) # --option=argument
+        [[ ${arg} =~ '=' ]] && PREFIX="${arg#*=}"
+        ;;
+      *) die "Unknown option: ${arg}" ;;
+   esac
+  done
+  return 0
+}
+
+__dispatch() {
+  # call to common module
+  # __allocate_nodes
+  #return
+
+  # manage host machines
+  (( CREATE_ALL )) && __create_all
+  #(( CREATE_NETWORK )) && __create_network
+  (( START )) && __start
+  (( START_ALL )) && __start_all
+  (( RESTART_ALL )) && __restart_all
+  (( STOP )) && __stop
+  (( STOP_ALL )) && __stop_all
+  (( DELETE )) && __delete
+  (( DELETE_ALL )) && __delete_all
+  (( GEN_CERTS )) && __gen_certs
+  (( GEN_CERTS_ALL )) && __gen_certs_all
+
+  #(( BECOME )) && __become
+  return 0
+}
+
+main() {
+  (( ${#} < MIN_ARG_COUNT )) && die "Expects at least ${MIN_ARG_COUNT} arguments" 1
+  (( $# > 0 )) && __get_opts "$@"
+
+  __dispatch
+
+  return 0
+}
+(( ${#} > 0 )) && main "${@}" || main

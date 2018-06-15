@@ -1,0 +1,90 @@
+#!/usr/bin/env bash
+#
+#  Distribute scripts to active script bin
+#
+declare PROJECT_DIR=~/bin/xs-swarm
+declare BIN_DIR=~/bin
+declare -A ALIASES=(
+  ['sm']='swarm.machines'
+  ['sn']='swarm.nodes'
+  ['ss']='swarm.services'
+)
+
+__copy() {
+  # move project files into script bin
+  local file=''
+  local -ra files=(
+    #"swarm.machines"
+    #"swarm.nodes"
+    #"swarm.services"
+    "swarm.conf.sh"
+    "swarm.aws.conf.sh"
+    "swarm.vbx.conf.sh"
+    "swarm.common.sh"
+  )
+  printf "\n"
+  for file in "${files[@]}"; do
+    cp "${file}" "${BIN_DIR}" \
+      && printf "👍🏻  Copied: %s to %s\n" "${file}" "${BIN_DIR}"
+  done
+  printf "\n"
+}
+
+__alias() {
+
+  printf "\n"
+
+  for alias in "${!ALIASES[@]}"; do
+    local file="${ALIASES[${alias}]}"
+    if [[ -f  "${BIN_DIR}/${alias}" ]]; then
+       echo "👉🏻  ${BIN_DIR}/${alias} already exists as symlink"
+    else
+      ln -s ${PROJECT_DIR}/${file} ${BIN_DIR}/${alias} \
+        && echo "👌🏻  Linked: ${PROJECT_DIR}/${file} -> ${BIN_DIR}/${alias}" \
+        || echo "☠️  Failed: ${PROJECT_DIR}/${file} -> ${BIN_DIR}/${alias}"
+    fi
+  done
+
+  printf "\n"
+}
+
+__unalias() {
+  for alias in "${!ALIASES[@]}"; do
+    rm -f ${BIN_DIR}/${alias}
+  done
+}
+
+__control() {
+  ssh control mkdir -p /home/ubuntu/bin/xs-swarm
+  scp -r ~/bin/xs-swarm/* control:/home/ubuntu/bin/xs-swarm/
+}
+
+declare FLAG=${1:-help}
+case ${FLAG} in
+  --del)
+    __unalias
+    ;;
+  --copy)
+    __copy
+    ;;
+  --alias)
+    __alias
+    ;;
+  --all)
+    __copy
+    __alias
+    ;;
+  --control)
+    __control
+    ;;
+  help)
+    echo '
+    Usage
+      ./dist --copy
+      ./dist --alias
+      ./dist --all
+      ./dist --unalias
+      ./dis --control
+    '
+    ;;
+esac

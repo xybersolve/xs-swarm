@@ -1,0 +1,376 @@
+#!/usr/bin/env bash
+# ================================================================
+# -*- mode: bash -*-
+# vi: set ft=sh
+# ****************************************************************
+#
+# DESCRIPTION
+#    Manage Swarm Nodes
+#
+# SYNTAX & EXAMPLES
+#    See 'SYNTAX' (below)
+#
+# ----------------------------------------------------------------
+# IMPLEMENTATION
+#    version         script 0.0.4
+#    author          Greg Milligan
+#    copyright       Copyright (c) 2017 http://www.xybersolve.com
+#    license         GNU General Public License
+#
+# ================================================================
+#  DEBUG OPTION
+#    set -n  # Uncomment to check your syntax, without execution.
+#    set -x  # Uncomment to debug this shell script
+#
+# ---------------------------------------------------------------
+#
+# TODO:
+# ****************************************************************
+
+
+# ---------------------------------------
+# CONFIGFURATION
+# ---------------------------------------
+# strict environment
+set -o errexit  # exit on command error status
+set -o nounset  # no unreadonlyd variables
+set -o pipefail # failr on pipe failures
+trap 'echo "Aborting due to errexit on line $LINENO. Exit code: ${?}" >&2' ERR
+
+# ---------------------------------------
+# GLOBAL VARIABLES
+# ---------------------------------------
+# booleans
+declare -ir TRUE=1
+declare -ir FALSE=0
+# script info
+
+declare -r PROGNAME="$(basename ${0})"
+declare -r VERSION=0.0.1
+declare -r SUBJECT=""
+#declare -r KEYS=""
+declare -ri MIN_ARG_COUNT=1
+declare -r SYNTAX=$(cat <<EOF
+
+    Script: ${PROGNAME}
+    Purpose:
+    Usage: ${PROGNAME} [-h|--help] [-v|--version]
+
+    Options:
+      General:
+        --help:  help and usage
+        --version: show version info
+        --join=<node name>: join single node to cluter
+        --join-all: join all nodes to the cluster
+        --type=<node type>: manager, worker; defaults to 'worker'
+        --view: view all
+        --leave: leave all cluster node
+        --run-on=swarm-wrk-02 <command arg1 arg2>: run commands on specific node
+        --run-all <command arg1 arg2 etc>: run any docker command on all node
+
+    Examples:
+      ${PROGNAME} --join-all
+      ${PROGNAME} --join=wrk2
+      ${PROGNAME} --join=mgr2 --type=manager
+      ${PROGNAME} --leave
+      ${PROGNAME} --view
+
+      ${PROGNAME} --run-on=wrk02 image ls
+      ${PROGNAME} --run-on=wrk02 container ls
+
+      ${PROGNAME} --run-all image ls
+      ${PROGNAME} --run-all image rm ae513a47849 5262886a4d4c
+
+      ${PROGNAME} --run-all container ls
+      ${PROGNAME} --run-all container ps -a
+
+EOF
+)
+# files & directories
+declare -r BIN_DIR=~/bin
+declare -r SCRIPT_DIR="$( dirname ${0} )"
+#declare -r CONFIG_FILE="${SCRIPT_DIR}/swarm.conf.sh"
+#declare -r CONFIG_FILE="${SCRIPT_DIR}/swarm.aws.conf.sh"
+declare -r CONFIG_FILE="${SCRIPT_DIR}/swarm.vbx.conf.sh"
+declare -r COMMON_FILE="${SCRIPT_DIR}/swarm.common.sh"
+#declare -r MACHINE_CONFIG_FILE=${SCRIPT_DIR}/swarm.aws.conf.sh
+
+# actions
+# machine actions
+declare -i BECOME=${FALSE}
+
+# swarm actions
+declare -i JOIN_ALL=${FALSE}
+declare -i JOIN=${FALSE}
+declare -i LEAVE_ALL=${FALSE}
+declare -i LEAVE=${FALSE}
+declare -i REMOVE=${FALSE}
+declare -i REMOVE_ALL=${FALSE}
+declare -i VIEW=${FALSE}
+declare -i RUN_ON_ALL=${FALSE}
+
+
+# global variables
+declare LEADER_IP
+declare MANAGER_TOKEN
+declare WORKER_TOKEN
+declare NODE_NAME=''
+declare NODE_TYPE='worker'
+
+# ---------------------------------------
+# COMMON FUNCTIONS
+# ---------------------------------------
+usage() {
+  echo "${SYNTAX}"
+}
+
+error() {
+  printf "\n%s\n" "Error: ${1}"
+}
+
+die() {
+  error "${1}"
+  usage
+  printf "\n\n"
+  exit "${2:-1}"
+}
+
+show_version() {
+  printf "\n\n%s  %s\n\n\n" "${PROGNAME}" "${VERSION}"
+  exit 0
+}
+
+show_help() {
+  printf "\n\n"
+  usage
+  printf "\n\n"
+  exit 0
+}
+
+# ---------------------------------------
+# MAIN ROUTINES
+# ---------------------------------------
+source "${CONFIG_FILE}" \
+  || die "Unable to load config file: ${CONFIG_FILE}" 1
+
+# defined in swarm.conf.sh
+declare -r MACHINE_CONFIG_FILE=${SCRIPT_DIR}/swarm.${MACHINE_TYPE_TO_USE}.conf.sh
+source "${MACHINE_CONFIG_FILE}" \
+  && echo "Loaded machine config file: ${MACHINE_CONFIG_FILE}" \
+  || die "Unable to load config file: ${MACHINE_CONFIG_FILE}" 1
+
+source "${COMMON_FILE}" \
+  || die "Unable to load common script file: ${COMMON_FILE}" 1
+
+
+__check_node_name() {
+  local func=${1:-'unknown'}
+  [[ -z "${NODE_NAME}" ]] && die "${func}: node 'name' is required" 4
+}
+
+#*********************************
+# Composite Routines
+#
+__join_all() {
+  #__create_network
+  __leave_all
+  __init_swarm
+  __join_defined
+}
+
+# docker swarm join --token SWMTKN-1-0z4nm37fj9m8c53hqripv025gfcbxtl4mhkodif84wz9gg8tj8-cpkmz7skyegb5m75i1l5kyx5n 192.168.99.121:2377
+
+#*********************************
+# Swarm Routines
+#
+__create_network() {
+  __become
+  docker network create -d overlay ${NETWORK} || true
+}
+
+__init_swarm() {
+  local leader="${NAMES[0]}"
+  echo "Leader: ${leader}"
+
+  __become "${leader}"
+
+  LEADER_IP=$(docker-machine ip ${leader})
+
+  docker swarm init --advertise-addr ${LEADER_IP} || true
+  MANAGER_TOKEN=$(docker swarm join-token manager -q)
+  WORKER_TOKEN=$(docker swarm join-token worker -q)
+
+  #MANAGER_TOKEN=$(docker -H ${LEADER_IP} swarm join-token manager -q)
+  #WORKER_TOKEN=$(docker -H ${LEADER_IP} swarm join-token worker -q)
+  echo "LEADER_IP: ${LEADER_IP}"
+  echo "MANAGER_TOKEN: ${MANAGER_TOKEN}"
+  echo "WORKER_TOKEN: ${WORKER_TOKEN}"
+}
+
+__join_defined() {
+  local key
+
+  for name in ${NAMES[@]}; do
+    local nodeType=${NODES[$name]}
+
+    __become "${name}"
+    local ip=$(docker-machine ip ${name})
+    echo "Join: ${name}, as: ${nodeType}, IP: ${ip}, LEADER_IP: ${LEADER_IP}"
+
+    if [[ ${nodeType} == 'worker' ]]; then
+      docker swarm join "${LEADER_IP}:${LEADER_PORT}" --token ${WORKER_TOKEN}  || true
+    elif [[ ${nodeType} == 'manager' ]]; then
+      # don't join the leader
+      if [[ ${ip} == ${LEADER_IP} ]]; then
+        echo "Bypassing leader as initilization host: IP: ${ip}, Leader IP: ${LEADER_IP}"
+      else
+        docker swarm join "${LEADER_IP}:${LEADER_PORT}" --token ${MANAGER_TOKEN} || true
+      fi
+    fi
+  done
+}
+
+__join() {
+  local NODE_NAME=${1:-${NODE_NAME}}
+  __check_node_name "__join"
+
+  __init_swarm
+  local nodeType=${NODES[${NODE_NAME}]:-${NODE_TYPE}}
+
+  __become "${NODE_NAME}"
+  local ip=$(docker-machine ip ${NODE_NAME})
+  echo "Join: ${NODE_NAME}, as: ${nodeType}, IP: ${ip}, LEADER_IP: ${LEADER_IP}"
+
+  if [[ ${nodeType} == 'worker' ]]; then
+    docker swarm join "${LEADER_IP}:${LEADER_PORT}" --token ${WORKER_TOKEN}  || true
+  elif [[ ${nodeType} == 'manager' ]]; then
+    # don't join the leader
+    if [[ ${ip} == ${LEADER_IP} ]]; then
+      echo "Bypassing leader as initilization host: IP: ${ip}, Leader IP: ${LEADER_IP}"
+    else
+      docker swarm join "${LEADER_IP}:${LEADER_PORT}" --token ${MANAGER_TOKEN} || true
+    fi
+  fi
+}
+
+__leave_all() {
+  local name
+  for name in ${NAMES[@]}; do
+    __leave "${name}"
+  done
+}
+
+__leave() {
+  NODE_NAME=${1:-${NODE_NAME}}
+  __check_node_name "__leave"
+  __become "${NODE_NAME}"
+  docker swarm leave --force || true
+}
+
+__remove_all() {
+  local name
+  for name in ${NAMES[@]}; do
+    __remove "${name}"
+  done
+}
+
+__remove() {
+  NODE_NAME="${1:-${NODE_NAME}}"
+  __check_node_name "__remove"
+
+  __become "${NODE_NAME}"
+  docker swarm leave
+
+  __become
+  # docker-machine stop "${NODE_NAME}"
+  docker node rm "${NODE_NAME}"
+}
+
+__rejoin_all() {
+  __quit_all
+  __join_all
+}
+
+__get_opts() {
+  while (( $# > 0 )); do
+    local arg="${1}"; shift;
+    case ${arg} in
+      # ancillary
+      --help)     show_help               ;;
+      --version)  show_version            ;;
+
+      # nodes
+      --join-all)
+        JOIN_ALL=${TRUE}
+        ;;
+      --join*)
+        JOIN=${TRUE}
+        [[ ${arg} =~ '=' ]] && NODE_NAME="${arg#*=}"
+        ;;
+      --type*)
+        [[ ${arg} =~ '=' ]] && NODE_TYPE="${arg#*=}"
+        ;;
+      --leave-all)
+        LEAVE_ALL=${TRUE}
+        ;;
+      --leave*)
+        [[ ${arg} =~ '=' ]] && NODE_NAME="${arg#*=}"
+        LEAVE=${TRUE}
+        ;;
+      --remove-all)
+        REMOVE_ALL=${TRUE}
+        ;;
+      --remove*)
+        REMOVE=${TRUE}
+        [[ ${arg} =~ '=' ]] && NODE_NAME="${arg#*=}"
+        ;;
+      --view)     VIEW=${TRUE}            ;;
+      # shared across modules
+      # an entry in each
+      --run-all)
+        __run_on_all "${@}"
+        exit 0;
+        #RUN_ON_ALL=${TRUE}
+        ;;
+
+      --run-on*)
+        [[ ${arg} =~ '=' ]] && NODE_NAME="${arg#*=}"
+        __run_on "${@}"
+        exit 0
+        ;;
+
+      --run-for*)
+        [[ ${arg} =~ '=' ]] && NODE_TYPE="${arg#*=}"
+        __run_for "${@}"
+        exit 0
+        ;;
+      # otherwise
+      *) die "Unknown option: ${arg}" ;;
+   esac
+  done
+  return 0
+}
+
+__dispatch() {
+  # __allocate_nodes
+
+  # nodes
+  (( JOIN_ALL )) && __join_all
+  (( JOIN )) && __join
+  (( VIEW )) && __view_all
+  (( LEAVE )) && __leave_all
+  (( REMOVE )) && __remove
+  (( REMOVE_ALL )) && __remove_all
+  (( RUN_ON_ALL )) && __run_on_all
+  return 0
+}
+
+main() {
+  (( ${#} < MIN_ARG_COUNT )) && die "Expects at least ${MIN_ARG_COUNT} arguments" 1
+  (( $# > 0 )) && __get_opts "$@"
+
+  __dispatch
+
+  return 0
+}
+(( ${#} > 0 )) && main "${@}" || main

@@ -1,0 +1,44 @@
+version: '3.1'
+
+services:
+  req:
+    image: xybersolve/zmq-http-req:latest
+    command: npm start
+    env_file:
+      - .env
+    ports:
+      - "8080:8080"
+    environment:
+      ZMQ_RES_ADDRESS: tcp://res:8672
+      HTTP_PORT: "8080"
+    deploy:
+      replicas: 3
+      placement:
+        constraints: [node.role == worker]
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:8080/ping"]
+      interval: 15s
+      timout: 5s
+      retries: 3
+    networks:
+       - zmq_network
+
+  res:
+    image: xybersolve/zmq-http-res:latest
+    command: npm start
+    env_file:
+      - .env
+    environment:
+      ZMQ_REQ_ADDRESS: "tcp://*:8672"
+      ZMQ_PORT: "8672"
+    deploy:
+      replicas: 3
+      placement:
+        constraints: [node.role == worker]
+    networks:
+       - zmq_network
+
+networks:
+   zmq_network:
+     driver: overlay
+#     subnet: "10.0.11.0/24"

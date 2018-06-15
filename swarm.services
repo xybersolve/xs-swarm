@@ -1,0 +1,915 @@
+#!/usr/bin/env bash
+# ================================================================
+# -*- mode: bash -*-
+# vi: set ft=sh
+# ****************************************************************
+#
+# DESCRIPTION
+#   Manage Swarm Services
+#
+# SYNTAX & EXAMPLES
+#    See 'SYNTAX' (below)
+#
+# ----------------------------------------------------------------
+# IMPLEMENTATION
+#    version         script 0.0.4
+#    author          Greg Milligan
+#    copyright       Copyright (c) 2017 http://www.xybersolve.com
+#    license         GNU General Public License
+#
+# ================================================================
+#  DEBUG OPTION
+#    set -n  # Uncomment to check your syntax, without execution.
+#    set -x  # Uncomment to debug this shell script
+#
+# ---------------------------------------------------------------
+#
+# TODO:
+# ****************************************************************
+
+
+# ---------------------------------------
+# CONFIGFURATION
+# ---------------------------------------
+# strict environment
+set -o errexit  # exit on command error status
+set -o nounset  # no unreadonlyd variables
+set -o pipefail # failr on pipe failures
+trap 'echo "Aborting due to errexit on line $LINENO. Exit code: ${?}" >&2' ERR
+
+# ---------------------------------------
+# GLOBAL VARIABLES
+# ---------------------------------------
+# booleans
+declare -ir TRUE=1
+declare -ir FALSE=0
+# script info
+
+declare -r PROGNAME="$(basename ${0})"
+declare -r VERSION=0.0.1
+declare -r SUBJECT=""
+declare -r KEYS=""
+declare -ri MIN_ARG_COUNT=1
+declare -r SYNTAX=$(cat <<EOF
+
+    Script: ${PROGNAME}
+    Purpose:
+    Usage: ${PROGNAME} [options]
+
+    Options:
+      --help:  help and usage
+      --version: show version info
+
+      --viz-up: start vizualizer
+      --viz-down: stop vizualizer
+
+      --up=<name> <parameters>: service up
+      --down=<name>: service down
+      --list: list all services
+      --log=<name>: attach to service log
+      --inspect=<name>: inspect service
+      --watch: load live service observation terminal screen
+      --stack=<stack_name> --file=<stack_file.yaml>
+      --remove-service: remove services by menu
+      --remove-all: remove all services
+      --remove-network: remove networks by menu
+      --ip: Get leader ip
+      --open: Open service
+      --load: load testing with Apache AB
+      --drill-down=<stack_name>: view deeper levels
+
+    Examples:
+      Service:
+        ${PROGNAME} --viz-up
+        ${PROGNAME} --viz-down
+        ${PROGNAME} --viz-open
+
+        ${PROGNAME} --portainer-up
+        ${PROGNAME} --portainer-down
+        ${PROGNAME} --portainer-open
+
+        ${PROGNAME} --gmilligan-up
+        ${PROGNAME} --gmilligan-down
+
+        ${PROGNAME} --zmq-up
+        ${PROGNAME} --zmq-down
+        ${PROGNAME} --zmq-ping
+        ${PROGNAME} --zmq-inc
+        ${PROGNAME} --zmq-open
+
+        ${PROGNAME} --up=nginx --name=my-nginx -p 8080:80 --constraint=node.role==worker
+        ${PROGNAME} --down=my-nginx
+        ${PROGNAME} --log=my-nginx
+        ${PROGNAME} --scale=4 --name=nginx
+        ${PROGNAME} --remove-service
+        ${PROGNAME} --remove-all
+        ${PROGNAME} --remove-network
+        ${PROGNAME} --debug=my-nginx
+
+        ${PROGNAME} --stack=apis --file=~/bin/xs-swarm/stacks/apis.yml
+
+      Support:
+        ${PROGNAME} --view
+        ${PROGNAME} --watch
+        ${PROGNAME} --drill-down=zmq
+        ${PROGNAME} --run-on-all docker ps
+        ${PROGNAME} --ssh=a1234578 --cmd=bash
+
+      External:
+        ${PROGNAME} --ip
+        ${PROGNAME} --open=80
+        ${PROGNAME} --load=80
+        ${PROGNAME} --load=80 --calls=1000 --concurrent=4 # defaults
+
+EOF
+)
+# files & directories
+declare -r SCRIPT_DIR="$( dirname ${0} )"
+#declare -r CONFIG_FILE="${SCRIPT_DIR}/swarm.conf.sh"
+#declare -r CONFIG_FILE="${SCRIPT_DIR}/swarm.aws.conf.sh"
+declare -r CONFIG_FILE="${SCRIPT_DIR}/swarm.vbx.conf.sh"
+declare -r COMMON_FILE="${SCRIPT_DIR}/swarm.common.sh"
+#declare -r MACHINE_CONFIG_FILE=${SCRIPT_DIR}/swarm.aws.conf.sh
+
+# actions
+# service actions
+declare -i UP=${FALSE}
+declare -i DOWN=${FALSE}
+declare -i INSPECT=${FALSE}
+declare -i LOG=${FALSE}
+declare -i LIST=${FALSE}
+declare -i WATCH=${FALSE}
+declare -i STACK_DEPLOY=${FALSE}
+declare -i REMOVE=${FALSE}
+declare -i REMOVE_ALL=${FALSE}
+declare -i REMOVE_NETWORK=${FALSE}
+declare -i DRILL_DOWN=${FALSE}
+declare -i SSH_SERVICE=${FALSE}
+
+# external
+declare -i OPEN=${FALSE}
+declare -i LOAD=${FALSE}
+
+# script globals
+declare STACK_FILE=''
+declare STACK_NAME=''
+declare NODE_NAME=''
+declare CMD=''
+
+declare NAME='my-nginx'
+declare IMAGE='nginx'
+declare PORT='80:80'
+declare NETWORK='web-network'
+declare ZMQ_NETWORK='zmq-backend'
+
+declare ZMQ_PORT='8672'
+declare HTTP_PORT='8686'
+
+# load
+declare CALLS=1000
+declare CONCURRENT=4
+
+# ---------------------------------------
+# COMMON FUNCTIONS
+# ---------------------------------------
+usage() {
+  echo "${SYNTAX}"
+}
+
+error() {
+  printf "\n%s\n" "Error: ${1}"
+}
+
+die() {
+  error "${1}"
+  usage
+  printf "\n\n"
+  exit "${2:-1}"
+}
+
+show_version() {
+  printf "\n\n%s  %s\n\n\n" "${PROGNAME}" "${VERSION}"
+  exit 0
+}
+
+show_help() {
+  printf "\n\n"
+  usage
+  printf "\n\n"
+  exit 0
+}
+
+# ---------------------------------------
+# MAIN ROUTINES
+# ---------------------------------------
+source "${CONFIG_FILE}" \
+  || die "Unable to load config file: ${CONFIG_FILE}" 1
+
+# defined in swarm.conf.sh
+declare -r MACHINE_CONFIG_FILE=${SCRIPT_DIR}/swarm.${MACHINE_TYPE_TO_USE}.conf.sh
+source "${MACHINE_CONFIG_FILE}" \
+  && echo "Loaded machine config file: ${MACHINE_CONFIG_FILE}" \
+  || die "Unable to load config file: ${MACHINE_CONFIG_FILE}" 1
+
+source "${COMMON_FILE}" \
+  || die "Unable to load common script file: ${COMMON_FILE}" 2
+
+#*********************************
+# Service Routines
+#  * these will be defined elsewhere
+#  * this is only for testing swarm
+#
+
+# Generic routines
+#
+__check_service_name() {
+  local func=${1:-'unknown'}
+  [[ -z "${SERVICE_NAME}" ]] && die "${func}: service name is required" 4
+}
+
+__create_network() {
+  docker network create --driver overlay backend
+}
+
+__up() {
+  __become
+  #__nginx_up
+}
+
+__down() {
+  __check_service_name "__down"
+  __become
+  docker service rm "${SERVICE_NAME}"
+}
+
+__list() {
+  __become
+  docker service ls
+}
+
+__inspect() {
+  __check_service_name "__inspect"
+  __become
+  docker service inspect "${SERVICE_NAME}" --pretty
+}
+
+__process() {
+  __check_service_name "__process"
+  __become
+  docker service ps "${SERVICE_NAME}"
+}
+
+# __run_on_all() {
+#   local node
+#   local cmd="${@}"
+#   for node in ${NAMES[@]}; do
+#     __become "${node}"
+#     eval "${cmd}"
+#   done
+# }
+
+__scale() {
+  __check_service_name "__scale"
+  __become
+  docker service scale ${SERVICE_NAME}=${REPLICAS}
+}
+
+__choose_service() {
+  local -a services=($(docker service ls | awk '{print $2}' | grep -v NAME))
+  PS3="Select 'service' by number: "
+  select service in "Abort" "${services[@]}"; do
+    [[  ${service} = "Abort" ]] \
+      && exit 0 \
+      || { SERVICE_NAME="${service}"; return 0; }
+  done
+}
+
+__remove() {
+  while true; do
+    __choose_service
+    echo "Removing: ${SERVICE_NAME}"
+    __become
+    docker service rm "${SERVICE_NAME}"
+  done
+}
+
+__remove_all() {
+  __become
+  local -a services=($(docker service ls | awk '{print $2}' | grep -v NAME))
+  echo "Deleting: ${services[@]}"
+  docker service rm "${services[@]}"
+}
+
+__choose_network() {
+  local -a networks=($(docker network ls | awk '{print $2}' | grep -v ID))
+  PS3="Select 'network' by number: "
+  select network in "Abort" "${networks[@]}"; do
+    [[  ${network} = "Abort" ]] \
+      && exit 0 \
+      || { NETWORK_NAME="${network}"; return 0; }
+  done
+}
+
+__remove_network() {
+  while true; do
+    __choose_network
+    echo "Removing Network: ${NETWORK_NAME}"
+    # __become
+    # docker network rm "${NETWORK_NAME}"
+  done
+}
+
+__watch() {
+  # keep terminal screen with service updates live
+  # -d flashes the differences as they change
+  __become
+  watch -d -n 1 docker service ls
+  #watch -d -n 1 docker service ps
+}
+
+__log() {
+  __check_service_name "__log"
+  __become
+  docker service logs "${SERVICE_NAME}"
+}
+
+__drill_down() {
+  local -a svcs=()
+  local svc
+
+  [[ -z "${SERVICE_NAME}" ]] && die "Service Name is required '--drill-down=zmq'" 6
+  printf "\nStack Services ---------------------- \n"
+  docker stack services "${SERVICE_NAME}"
+  printf "\nStack Processes ---------------------- \n"
+  docker stack ps "${SERVICE_NAME}"
+
+  # svcs=($(docker stack services "${SERVICE_NAME}" -q))
+  # for svc in ${svcs[@]}; do
+  #   # inspect each service
+  #   printf "\n"
+  #   docker inspect "${svc}"
+  # done
+  # printf "\n"
+}
+
+__ssh_service() {
+  [[ -z ${SSH_SERVICE} ]] && die "Service has is required" 7
+  [[ -z ${NODE_NAME} ]] && die "Node name has is required" 8
+
+  __become "${NODE_NAME}"
+
+  docker exec -it "${SERVICE_HASH}" bash
+  #docker exec -it "${SERVICE_HASH}" sh
+
+}
+
+__debug_service() {
+  __become
+  echo
+  echo "docker service ls"
+  docker service ls
+  echo
+  echo "docker service ps ${SERVICE_NAME}"
+  docker service ps "${SERVICE_NAME}"
+  echo
+  echo "--------------------------------------------"
+  echo "Next possible steps:"
+  echo "Join the 'node' container is running on"
+  echo "$ docker ps <- to grab container hash"
+  echo "$ docker exec -it <hash> bash|sh <- ssh into container"
+  echo "$ dig my-nginx <- ses service discovery load balancer"
+  echo "$ dig tasks.mynginx <- see IPs for all containers"
+  echo "$ curl localhost:<port> <- test endpoint"
+  echo "$ curl lb_ip:<port> <- test internal load balancer"
+  echo "--------------------------------------------"
+  echo
+}
+
+__update_status() {
+  watch -n 1 -d docker service inspect my-nginx \
+    | jq .[].UpdateStatus
+}
+
+__stack_deploy() {
+  #docker network create --driver overlay zmq-http-req-res
+  echo docker stack deploy --compose-file ${STACK_FILE} ${STACK_NAME}
+  docker stack deploy --compose-file ${STACK_FILE} ${STACK_NAME}
+}
+
+#
+# Simple Nginx
+#
+# cd /path/to/your/website
+# find . -type d -print0|xargs -0 chmod 755
+# find . -type f -print0|xargs -0 chmod 644
+# chown nginx:nginx * -R
+
+__nginx_up() {
+  __become
+  docker network create --driver overlay nginxoverlay || true
+  docker service create \
+    --name my-nginx \
+    --replicas 3 \
+    --network nginxoverlay \
+    -p "8080:80" \
+    nginx:latest
+}
+
+__nginx_down() {
+  __become
+  docker service rm my-nginx
+  docker network rm nginxoverlay
+}
+#
+#  ZeroMQ Services
+#
+__create_zmq_network() {
+  __become
+  docker network create \
+    --driver=overlay \
+    ${ZMQ_NETWORK} || true
+
+# --subnet=10.0.11.0/24 \
+
+}
+
+__zmq_up() {
+  __create_zmq_network
+  __zmq_res_up
+  __zmq_req_up
+}
+
+__zmq_down() {
+  __become
+  docker service rm responder requestor || true
+  docker network rm ${ZMQ_NETWORK}
+}
+
+__zmq_res_up() {
+  __become
+  docker service create \
+    --name "responder" \
+    --replicas 3 \
+    --env "ZMQ_REQ_ADDRESS=tcp://*:${ZMQ_PORT}" \
+    --env "ZMQ_PORT=${ZMQ_PORT}" \
+    --network "${ZMQ_NETWORK}" \
+    --constraint 'node.role == worker' \
+    xybersolve/zmq-http-res
+
+    #--publish "${ZMQ_PORT}:${ZMQ_PORT}" \
+}
+
+__zmq_req_up() {
+  __become
+  docker service create \
+    --name "requestor" \
+    --replicas 3 \
+    -p "${HTTP_PORT}:${HTTP_PORT}" \
+    --env "ZMQ_RES_ADDRESS=tcp://responder:${ZMQ_PORT}" \
+    --env "HTTP_PORT=${HTTP_PORT}" \
+    --network "${ZMQ_NETWORK}" \
+    --constraint 'node.role == worker' \
+    xybersolve/zmq-http-req
+
+  #--publish "${HTTP_PORT}:${HTTP_PORT}" \
+}
+
+__zmq_res_down() {
+  docker service rm responder
+}
+
+__zmq_req_down() {
+  docker service rm requestor
+}
+
+__zmq_req_res_down() {
+  docker service rm requestor responder
+}
+
+__zmq_update() {
+  docker service update --force requestor
+  docker service update --force responder
+}
+
+__zmq_open() {
+  local ip=$( __ip )
+  echo "Manager IP: ${ip}"
+  open http://${ip}:${HTTP_PORT}/ping
+}
+#
+#  ZeroMQ Stack
+#
+declare -r zmq_stack=zmq
+
+__zmq_stack_up() {
+  docker network create --driver overlay ${ZMQ_NETWORK}
+  docker stack deploy --compose-file compose-zeromq.yaml ${zmq_stack}
+}
+
+__zmq_stack_prune() {
+  docker stack deploy --prune ${zmq_stack}
+}
+
+__zmq_stack_down() {
+  docker stack rm ${zmq_stack}
+}
+
+#
+# gmilligan website
+#
+__gmilligan_net() {
+  docker network create --driver=overlay gmilligan-net || true
+}
+
+__gmilligan_up() {
+  #docker stack deploy
+  __gmilligan_net
+
+  docker service create \
+    --name "gmilligan" \
+    --replicas 2 \
+    -p "80:80" \
+    --constraint 'node.role == worker' \
+    --network gmilligan-net \
+    xybersolve/gmilligan.web:latest
+}
+
+__gmilligan_down() {
+  docker service rm gmilligan || true
+  docker network rm gmilligan-net
+}
+
+
+#
+#  Swarm Visualizer service
+#
+__visualizer_up() {
+  __become
+  docker service create \
+    --name=visualizer \
+    --publish=9090:8080/tcp \
+    --constraint=node.role==manager \
+    --mount=type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
+    dockersamples/visualizer
+
+}
+
+__visualizer_down() {
+  __become
+  docker service stop vizualizer
+  docker service rm vizualizer
+}
+#
+# Portainer
+#
+__portainer_up() {
+  __become
+  docker volume create portainer_data
+  docker service create \
+  --name portainer \
+  --publish 9000:9000 \
+  --replicas=1 \
+  --constraint 'node.role == manager' \
+  --mount type=bind,src=//var/run/docker.sock,dst=/var/run/docker.sock \
+  --mount type=volume,src=portainer_data,dst=/data \
+  portainer/portainer \
+  -H unix:///var/run/docker.sock
+
+  # docker service create \
+  #   --name portainer \
+  #   --publish 9000:9000 \
+  #   --replicas=1 \
+  #   --constraint 'node.role == manager' \
+  # portainer/portainer
+#--mount type=bind,src=//Users/Greg/bin/xs-swarm/portainer/data,dst=/data \
+# docker run -d -p 9000:9000 -v /var/run/docker.sock:/var/run/docker.sock -v portainer_data:/data portainer/portainer
+}
+
+__portainer_down() {
+  __become
+  docker service rm portainer
+}
+
+__portainer_open() {
+  local ip=$( __ip )
+  open "http://${ip}:9000"
+}
+
+#*********************************
+# External
+#
+__open() {
+  local ip=$(docker-machine ip ${NAMES[0]})
+  open http://${ip}:80
+}
+
+__nginx_open() {
+  local ip=$(docker-machine ip ${NAMES[0]})
+  open http://${ip}:8080
+}
+
+__vis_open() {
+  local ip=$(docker-machine ip ${NAMES[0]})
+  open http://${ip}:9090
+}
+
+__load() {
+  local ip=$( __ip )
+  ab -n ${CALLS} -c ${CONCURRENT} http://${ip}:${PORT}/
+}
+
+#
+# DOCUMENTATION & REFERENCE
+#
+# Updating & Tricks
+#
+__updates() {
+  # updates config policy - doesn't restart task
+  # "Version.Index" : 1737 <- is unique across services
+  docker service update --image xybersolve/xs-jenkins-blue:2.4 my-jenkins
+  # 1 at a time (default), every 1 minute and 20 seconds
+  docker service update --image xybersolve/xs-jenkins-blue:2.4 --update-delay=1m20s my-jenkins
+  # 2 at a time, every 5 seconds
+  docker service update --image xybersolve/xs-jenkins-blue:2.4 --update-delay=5s --update-parallelism=2 my-jenkins
+  update --update-parallelism=2 my-jenkins
+  update --update-failure-action=continue|pause my-jenkins
+
+  # force new task creation
+  docker service update --force my-nginx
+}
+
+__resume_update() {
+  :
+  # --update-failure-action=pause
+  __become
+  service update my-nginx
+}
+
+__rollback() {
+  # role back service policy
+  #
+  docker service update --rollback my-nginx
+  docker service update --update-failure-action=rollback
+}
+
+
+__debug_task() {
+  # drill into failed task
+  docker inspect $task_id # <- from ps
+}
+
+__debug_container() {
+  local container_hash=''
+  __become
+  # view the container service
+  # see which node it is running on
+  docker service ps requestor
+  # join that node
+  __become "${wrk2}" # <- which node it is runnung on
+  # view the actual processes
+  docker ps
+  # grab the container's hash
+  # ssh into container on given node, using container hash
+  docker exec -it ${container_hash} sh
+  # install dig & nslookup
+  apt-get install dnsutils
+  # dig the discovery name
+  dig my-nginx
+  #> my-nginx.		600	IN	A	10.0.0.8
+
+}
+
+__discovery_service_debug() {
+  ## ssh into container
+  __debug_container
+  # dig on the container mapping
+  # $ dig responder
+
+}
+__clean_task_history() {
+  # scale to 0 - back to original - cleans out history list
+  docker service scale my-nginx=0
+  docker service scale my-nginx=5
+}
+
+
+__get_opts() {
+  while (( $# > 0 )); do
+    local arg="${1}"; shift;
+    case ${arg} in
+      --help)    show_help                ;;
+      --version) show_version             ;;
+      # services
+      # TODO: setup for multiple or named services
+      --network)
+        __create_network
+        exit 0
+        ;;
+      --up*)
+        [[ ${arg} =~ '=' ]] && SERVICE_NAME="${arg#*=}"
+        UP=${TRUE}
+        ;;
+      --down*)
+        DOWN=${TRUE}
+        [[ ${arg} =~ '=' ]] && SERVICE_NAME="${arg#*=}"
+        ;;
+      --list)
+        LIST=${TRUE}
+        ;;
+      --log*)
+        [[ ${arg} =~ '=' ]] && SERVICE_NAME="${arg#*=}"
+        LOG=${TRUE}
+        ;;
+      --inspect*)
+        [[ ${arg} =~ '=' ]] && SERVICE_NAME="${arg#*=}"
+        INSPECT=${TRUE}
+        ;;
+      --ps*)
+        [[ ${arg} =~ '=' ]] && SERVICE_NAME="${arg#*=}"
+        __process
+        exit 0;
+        ;;
+      --watch)
+        WATCH=${TRUE}
+        ;;
+      --status)
+        __update_status
+        exit 0
+        ;;
+      --drill-down*|--dd*)
+        DRILL_DOWN=${TRUE}
+        [[ ${arg} =~ '=' ]] && SERVICE_NAME="${arg#*=}"
+        ;;
+      --ssh*)
+        SSH_SERVICE=${TRUE}
+        [[ ${arg} =~ '=' ]] && SERVICE_HASH="${arg#*=}"
+        ;;
+      --remove-service*)
+        REMOVE=${TRUE}
+        [[ ${arg} =~ '=' ]] && SERVICE_NAME="${arg#*=}"
+        ;;
+      --remove-all)
+        REMOVE_ALL=${TRUE}
+        ;;
+      --remove-network*)
+        REMOVE_NETWORK=${TRUE}
+        [[ ${arg} =~ '=' ]] && NETWORK_NAME="${arg#*=}"
+        ;;
+      --stack*)
+        [[ ${arg} =~ '=' ]] && STACK_NAME="${arg#*=}"
+        STACK_DEPLOY=${TRUE}
+        ;;
+      --file*)
+        [[ ${arg} =~ '=' ]] && STACK_FILE="${arg#*=}"
+        ;;
+      --node*)
+        [[ ${arg} =~ '=' ]] && NODE_NAME="${arg#*=}"
+        ;;
+      --cmd*)
+        [[ ${arg} =~ '=' ]] && CMD="${arg#*=}"
+        ;;
+
+      # shared across modules
+      # an entry in each
+      --run-on-all*)
+        __run_on_all "${@}"
+        exit 0
+        ;;
+      --run-for*)
+        [[ ${arg} =~ '=' ]] && NODE_TYPE="${arg#*=}"
+        __run_for "${@}"
+        exit 0
+        ;;
+      --debug*)
+        [[ ${arg} =~ '=' ]] \
+          && SERVICE_NAME="${arg#*=}" \
+          || die "Service name is require argument: --debug-service=my-nginx"
+
+        __debug_service
+        exit 0
+        ;;
+      --image*)
+        [[ ${arg} =~ '=' ]] && IMAGE="${arg#*=}"
+        ;;
+      --name*)
+        [[ ${arg} =~ '=' ]] && NAME="${arg#*=}"
+        ;;
+
+      --scale*)
+        [[ ${arg} =~ '=' ]] && REPLICAS="${arg#*=}"
+        __service_scale
+        ;;
+      # gmilligan
+      --gmilligan-up)
+        __gmilligan_up; exit 0; ;;
+
+      --gmilligan-down)
+        __gmilligan_down; exit 0; ;;
+
+      # nginx
+      --nginx-up)
+        __nginx_up; exit 0; ;;
+      --nginx-down)
+        __nginx_down; exit 0; ;;
+      --nginx-open)
+        __nginx_open; exit 0; ;;
+
+      # visualizer
+      --vis-up)
+        __visualizer_up; exit 0;
+        ;;
+      --vis-down)
+        __visualizer_down; exit 0;
+        ;;
+      --vis-open)
+        __vis_open; exit 0;
+        ;;
+
+      # portainer
+      --portainer-up)
+        __portainer_up; exit 0; ;;
+      --portainer-down)
+        __portainer_down; exit 0; ;;
+      --portainer-open)
+        __portainer_open; exit 0; ;;
+
+      # zeromq-req-res 
+      --res-up) __zmq_res_up; exit 0; ;;
+      --req-up) __zmq_req_up; exit 0; ;;
+      --req-down) __zqm_req_down; exit 0; ;;
+      --res-down) __zmq_res_down; exit 0; ;;
+      --zmq-up) __zmq_up; exit 0; ;;
+      --zmq-down) __zmq_down; exit 0; ;;
+      --zmq-update) __zmq_update; exit 0; ;;
+      --zmq-open) __zmq_open; exit 0; ;;
+
+      # zeromq req-res=http compose
+      --zmq-stack-up)
+        __zmq_compose_up
+        exit 0
+        ;;
+      --zmq-stack-down)
+        __zmq_compose_down
+        exit 0
+        ;;
+      --zmq-stack-prune)
+        __zqm_stack_prune
+        exit 0
+        ;;
+      # external
+      --open*)
+        OPEN=${TRUE}
+        [[ ${arg} =~ '=' ]] && PORT="${arg#*=}" || PORT='8080'
+        ;;
+      --load*)
+        LOAD=${TRUE}
+        [[ ${arg} =~ '=' ]] && PORT="${arg#*=}" || PORT='8080'
+        ;;
+      --calls*)
+        [[ ${arg} =~ '=' ]] && CALLS="${arg#*=}"
+        ;;
+      --concurrent*)
+        [[ ${arg} =~ '=' ]] && CONCURRENT="${arg#*=}"
+        ;;
+      --ip)
+        # call to common lib
+        __ip
+        ;;
+
+      *) die "Unknown option: ${arg}" ;;
+   esac
+  done
+  return 0
+}
+
+__dispatch() {
+  # __allocate_nodes
+
+  # service
+  (( UP )) && __up
+  (( DOWN )) && __down
+  (( INSPECT )) && __inspect
+  (( LOG )) && __log
+  (( LIST )) && __list
+  (( WATCH )) && __watch
+  (( DRILL_DOWN )) && __drill_down
+  (( SSH_SERVICE )) && __ssh_service
+  (( STACK_DEPLOY )) && __stack_deploy
+  (( REMOVE )) && __remove
+  (( REMOVE_ALL )) && __remove_all
+  (( REMOVE_NETWORK )) && __remove_network
+  # external
+  (( OPEN )) && __open
+  (( LOAD )) && __load
+  return 0
+}
+
+main() {
+  (( ${#} < MIN_ARG_COUNT )) && die "Expects at least ${MIN_ARG_COUNT} arguments" 1
+  (( $# > 0 )) && __get_opts "$@"
+
+  __dispatch
+
+  return 0
+}
+(( ${#} > 0 )) && main "${@}" || main

@@ -1,0 +1,30 @@
+---
+version: '3.3'
+
+services:
+  image: dockersamples/visualizer
+  container_name: visualizer
+  ports:
+    - "9090:8080"
+  deploy:
+    placement:
+      contraints: [node.role == manager]
+    resources:
+      limits:
+        cpus: '0.1'
+        memory: 100M
+    networks:
+      - visualizeroverlay
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+
+networks:
+  visualizeroverlay:
+
+
+#  docker service create \
+# --name=visualizer \
+# --publish=9090:8080/tcp \
+# --constraint=node.role==manager \
+# --mount=type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
+# dockersamples/visualizer
