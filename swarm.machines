@@ -66,6 +66,8 @@ declare -r SYNTAX=$(cat <<EOF
       --start-all: Start all machine defined in config file
       --restart-all: start and generate certs for all swarm machines
 
+      --update: sync all machines with definitions (add & remove outliers)
+
       --stop=<node name>: Stop docker host machines
       --stop-all: stop all machines in the swarm
 
@@ -88,35 +90,45 @@ declare -r SYNTAX=$(cat <<EOF
       ${PROGNAME} --start-all
       ${PROGNAME} --stop=swarm-wrk-03
       ${PROGNAME} --stop-all
+      ${PROGNAME} --update
       ${PROGNAME} --delete=swarm-wrk-02
       ${PROGNAME} --delete-all
       ${PROGNAME} --gen-certs-all
       ${PROGNAME} --gen-certs=swarm-wrk-02
+      Debug:
+      ${PROGNAME} --get-aws
 EOF
 )
 # files & directories
 declare -r BIN_DIR=~/bin
 declare -r SCRIPT_DIR="$( dirname ${0} )"
-#declare -r CONFIG_FILE="${SCRIPT_DIR}/swarm.conf.sh"
-#declare -r CONFIG_FILE="${SCRIPT_DIR}/swarm.aws.conf.sh"
 
 # reads in machine specific conf file
 declare -r CONFIG_FILE="${SCRIPT_DIR}/swarm.conf.sh"
 declare -r COMMON_FILE="${SCRIPT_DIR}/swarm.common.sh"
 declare -r EC2_LIB_FILE="${SCRIPT_DIR}/ec2.sh"
+declare -r AWS_LIB_FILE="${SCRIPT_DIR}/aws.sh"
 
 # actions
 declare -i CREATE=${FALSE}
 declare -i CREATE_ALL=${FALSE}
 declare -i START=${FALSE}
+declare -i RESTART=${FALSE}
 declare -i START_ALL=${FALSE}
 declare -i RESTART_ALL=${FALSE}
+declare -i UPDATE=${FALSE}
 declare -i STOP=${FALSE}
 declare -i STOP_ALL=${FALSE}
 declare -i DELETE=${FALSE}
 declare -i DELETE_ALL=${FALSE}
 declare -i GEN_CERTS=${FALSE}
 declare -i GEN_CERTS_ALL=${FALSE}
+declare -i TUNNEL=${FALSE}
+
+# global variables
+declare -A EXTANT_NODE=()
+declare -A ADD_NODES=()
+declare -a DELETE_NODES=()
 
 # ---------------------------------------
 # COMMON FUNCTIONS
@@ -163,8 +175,11 @@ source "${MACHINE_CONFIG_FILE}" \
 source "${COMMON_FILE}" \
   || die "Unable to load common script file: ${COMMON_FILE}" 2
 
-source "${EC2_LIB_FILE}" \
-  || die "Unable to load EC2 lib script file: ${EC2_LIB_FILE}" 3
+source "${AWS_LIB_FILE}" \
+  || die "Unable to load AWS Library file: ${AWS_LIB_FILE}" 4
+
+# source "${EC2_LIB_FILE}" \
+#   || die "Unable to load EC2 lib script file: ${EC2_LIB_FILE}" 3
 
 #*********************************
 # Machine Routines
@@ -269,21 +284,59 @@ __start_all() {
   done
 
   # regenerate certificates for all machines in swarm
-  for name in ${NAMES[@]}; do
-    __gen_certs "${name}"
-  done
+  # moved to __start
+  # for name in ${NAMES[@]}; do
+  #   __gen_certs "${name}"
+  # done
 }
 
 __start() {
   MACHINE_NAME=${1:-${MACHINE_NAME}}
   __check_machine_name "__start"
-  docker-machine start ${MACHINE_NAME}
+  docker-machine start "${MACHINE_NAME}"
+  __gen_certs "${MACHINE_NAME}"
+  # docker node update --label-add worker --label-add wrk1 "${MACHINE_NAME}"
+}
+
+__restart() {
+  __check_machine_name "__restart"
+  __stop
+  __start
 }
 
 # complte restart abnd certificate generation
 __restart_all() {
+  __stop_all
   __start_all
   __gen_certs_all
+}
+
+__get_extant() {
+  local -a nodes=()
+  local -a keys=()
+  local -A NEW=()
+  local -i found=${FALSE}
+  extant=($( docker node ls | tr -d '*' | awk '{print $2}' | grep -v HOSTNAME ))
+  keys=("${!NODES[@]}")
+
+  for key in "${keys[@]}"; do
+    found=${FALSE}
+    for node in "${extant[@]}"; do
+      [[ "${node}" == "${key}" ]] && found=${TRUE}
+    done
+    (( found )) || ADD_NODES[${key}]="${NODES[${key}]}"
+  done
+
+  for node in "${extant[@]}"; do
+    found=${FALSE}
+    for key in "${keys[@]}"; do
+      [[ "${node}" == "${key}" ]] && found=${TRUE}
+    done
+    (( found )) || DELETE_NODES+=("${key}")
+  done
+
+  echo "ADD: ${!ADD_NODES[@]}"
+  echo "DELETE: ${DELETE_NODES[@]}"
 }
 
 __clean() {
@@ -293,7 +346,7 @@ __clean() {
 __stop_all() {
   local name
 
-  __clean_client_env
+  #__clean_client_env
 
   for name in ${NAMES[@]}; do
     __stop "${name}"
@@ -306,14 +359,15 @@ __stop() {
   __check_machine_name "__stop"
 
   __become
-  docker node update --availability drain "${MACHINE_NAME}" || true
+  # needs to be in swarm.node
+  #docker node update --availability drain "${MACHINE_NAME}" || true
   docker-machine stop "${MACHINE_NAME}" || true
 }
 
 __delete_all() {
   local name
 
-  __clean_client_env
+  #__clean_client_env
 
   for name in ${NAMES[@]}; do
     __delete "${MACHINE_NAME}"
@@ -347,6 +401,52 @@ __ips() {
     printf "%s: %s\n" "${name}" "${ip}"
   done
 }
+#
+#  EFS
+#
+__install_efs() {
+  local efs_dns_name=''
+
+  for name in "${NAMES[@]}"; do
+    ssh "${name}" apt-get install nfs-common
+    ssh "${name}" mgr1 mkdir /mnt/efs
+    ssh "${name}" mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 "${efs_dns_name}":/ /mnt/efs
+
+    # fstab
+    "${efs_dns_name}:/" /mnt/efs nfs4 nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2,_netdev 0 0
+  done
+
+  ssh "${NAMES[0]}" mkdir –p /mnt/efs/wordpress
+  ssh "${NAMES[0]}" mkdir –p /mnt/efs/mysql
+
+}
+
+__setup_tunnel() {
+  # presumes ~/.ssh/config hostname of ${LEADER}
+  ssh -NL localhost:2376:/var/run/docker.sock "${LEADER}" &
+}
+
+__command() {
+  docker -H localhost:2376 node ls
+}
+
+__get_aws() {
+  __get_env
+  echo "EC2_REGION: ${EC2_REGION}"
+}
+
+__install_efs() {
+  local dir_target='/mnt/efs'
+  #DIR_SRC="${EC2_AVAIL_ZONE}.${EFS_FILE_SYSTEM_ID}.efs.${EC2_REGION}.amazonaws.com"
+  sudo apt-get install -y nfs-common
+  sudo mkdir -p "${dir_target}"
+  sudo mount -t nfs4 -o nfsvers=4.1,rsize=1048576,wsize=1048576,hard,timeo=600,retrans=2 ${EFS_DNS}:/ /mnt/efs
+  # backup of fstab & write new record
+  cp -p "/etc/fstab" "/etc/fstab.back-$(date +%F)"
+  echo -e "${EFS_DNS}:/ \t\t ${dir_target} \t\t nfs \t\t nfsvers=4.1,rsize=1048576,wsize=1048576,soft,timeo=600,retrans=2 \t\t 0 \t\t 0" | tee -a /etc/fstab
+  # create wordpress directory
+  #sudo mkdir –p /mnt/efs/wordpress
+}
 
 __get_opts() {
   while (( $# > 0 )); do
@@ -364,6 +464,7 @@ __get_opts() {
         __list
         exit 0
         ;;
+      --extant) { __get_extant; exit 0; } ;;
       #--create-net*) CREATE_NETWORK=${TRUE}        ;;
       --start-all)
         START_ALL=${TRUE}
@@ -372,10 +473,18 @@ __get_opts() {
         START=${TRUE}
         [[ ${arg} =~ '=' ]] && MACHINE_NAME="${arg#*=}"
         ;;
+
       --restart-all)
         RESTART_ALL=${TRUE}
         [[ ${arg} =~ '=' ]] && MACHINE_NAME="${arg#*=}"
         ;;
+
+      --restart*)
+        RESTART=${TRUE}
+        [[ ${arg} =~ '=' ]] && MACHINE_NAME="${arg#*=}"
+        ;;
+
+      --update) UPDATE=${TRUE}  ;;
       --stop-all)
         STOP_ALL=${TRUE}
         ;;
@@ -414,6 +523,12 @@ __get_opts() {
       --prefix*) # --option=argument
         [[ ${arg} =~ '=' ]] && PREFIX="${arg#*=}"
         ;;
+      --get-aws)
+        __get_aws; exit 0; ;;
+      --tunnel)
+        TUNNEL=${TRUE}  ;;
+      --command)
+        __command "${@}" ; exit 0; ;;
       *) die "Unknown option: ${arg}" ;;
    esac
   done
@@ -430,13 +545,16 @@ __dispatch() {
   #(( CREATE_NETWORK )) && __create_network
   (( START )) && __start
   (( START_ALL )) && __start_all
+  (( RESTART )) && __restart
   (( RESTART_ALL )) && __restart_all
+  (( UPDATE )) && __update
   (( STOP )) && __stop
   (( STOP_ALL )) && __stop_all
   (( DELETE )) && __delete
   (( DELETE_ALL )) && __delete_all
   (( GEN_CERTS )) && __gen_certs
   (( GEN_CERTS_ALL )) && __gen_certs_all
+  (( TUNNEL )) && __setup_tunnel
 
   #(( BECOME )) && __become
   return 0

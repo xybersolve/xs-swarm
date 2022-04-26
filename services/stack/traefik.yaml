@@ -1,0 +1,87 @@
+version: "3.3"
+
+networks:
+  traefik-net:
+    external: true
+#  socat-net:
+#    external: true
+
+configs:
+  traefik.toml:
+    file: ./configs/traefik.toml
+#
+# traefik
+#
+# socat connectivity
+# --docker.endpoint=tcp://socat-net:2375 \
+services:
+  traefik:
+    image: traefik
+    command: --web \
+      --docker \
+      --docker.swarmmode \
+      --docker.domain=docker.localhost \
+      --docker.watch \
+      --api \
+      --logLevel=DEBUG
+    networks:
+      - traefik-net
+      #- socat-net
+    configs:
+       - source: traefik.toml
+         target: /etc/traefik/traefik.toml
+    ports:
+      - "80:80"
+      - "8080:8080"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      # various traefik configuration options
+      #- /var/run/docker.sock:/var/run/docker.sock:ro
+      #- ./configs/traefik.toml:/etc/traefik/traefik.toml
+      #- /dev/null:/traefik.toml
+      #- ./traefik.toml:/traefik.toml
+      #- ./acme.json:/acme.json
+    deploy:
+      mode: replicated
+      replicas: 1
+      update_config:
+        delay: 2s
+      placement:
+        constraints: [node.role==manager]
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: '0.33'
+          memory: 128M
+        reservations:
+          cpus: '0.05'
+          memory: 64M
+#
+# socat
+#
+  # socat:
+  #   image: rancher/socat-docker
+  #   networks:
+  #     - socat-net
+  #     - traefik-net
+  #   volumes:
+  #     - /var/run/docker.sock:/var/run/docker.sock
+  #   deploy:
+  #     mode: replicated
+  #     replicas: 1
+  #     update_config:
+  #       delay: 2s
+  #     placement:
+  #       constraints: [node.role==manager]
+  #     restart_policy:
+  #       condition: on-failure
+  #       max_attempts: 3
+  #     resources:
+  #       limits:
+  #         cpus: '0.33'
+  #         memory: 128M
+  #       reservations:
+  #         cpus: '0.05'
+  #         memory: 64M

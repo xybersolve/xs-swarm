@@ -7,6 +7,10 @@ declare MACHINE_TYPE='aws'
 declare -i MANAGERS=1
 declare -i WORKERS=2
 
+declare LEADER='mgr1'
+declare -r EFS_ID='fs-ffcda356'
+declare -r EFS_DNS="${EFS_ID}.efs.us-west-2.amazonaws.com"
+
 # holders for the rendered nodes
 # global throughout all routine modules
 declare -a NAMES=(

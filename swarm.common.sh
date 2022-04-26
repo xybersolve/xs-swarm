@@ -1,7 +1,26 @@
 #
 #  Routines shared by swarm scripts
 #
+declare DIVIDER='****************************************'
+declare SEPARATOR='----------------------------------------'
 declare NODE_TYPE=''
+declare _xsRESET='\e[0m'
+declare _xsDEFAULT='\e[39m'
+declare _xsRED='\e[31m'
+declare _xsGREEN='\e[32m'
+declare _xsYELLOW='\e[33m'
+declare _xsBLUE='\e[34m'
+declare _xsMAGENTA='\e[35m'
+declare _xsCYAN='\e[36m'
+declare _xsLIGHTGRAY='\e[37m'
+declare _xsDARKGRAY='\e[90m'
+declare _xsLIGHTRED='\e[91m'
+declare _xsLIGHTGREEN='\e[92m'
+declare _xsLIGHTYELLOW='\e[93m'
+declare _xsLIGHTBLUE='\e[94m'
+declare _xsLIGHTMAGENTA='\e[95m'
+declare _xsLIGHTCYAN='\e[96m'
+declare _xsWHITE='\e[97m'
 
 __allocate_nodes() {
   #
@@ -34,8 +53,9 @@ __become() {
   # configure docker as manager node machine
   # __become - with no argument, means become leader
   local node=${1:-${NAMES[0]}}
-  echo "become: ${node}"
+  #echo "become: ${node}"
   eval $(docker-machine env "${node}")
+  #  || echo "No docker-machine, assuming other means"
 }
 
 __ip() {
@@ -56,31 +76,68 @@ __set_completion() {
 #*********************************
 # Support Routines
 #
+__success() {
+  printf " ${_xsLIGHTGREEN} 👌🏻  %s${_xsRESET}\n" "${1:?message argument is required}"
+}
+
+__fail() {
+  printf " ${_xsLIGHTRED} ☠️  %s${_xsRESET}\n" "${1:?message argument is required}"
+}
+
+__info() {
+  printf " ${_xsLIGHTYELLOW} 👉🏻  %s${_xsRESET}\n" "${1:?message argument is required}"
+}
+
+
+__view_header() {
+  local item="${1}"
+  printf '\n%s\n' "${SEPARATOR}"
+  printf 'View: %s\n' "${item}"
+}
+
+__view_separator() {
+  printf '\n%s\n' "${DIVIDER}"
+}
+
+__view_cmd() {
+  local cmd="${1}"
+  printf "${_xsLIGHTYELLOW}%s${_xsRESET}\n" "${cmd}"
+}
+
 __view_nodes() {
+  __view_header "Nodes"
   __become
+  __view_cmd 'docker node ls'
   docker node ls
 }
 
 __view_service() {
+  __view_header "Services"
   __become
+  __view_cmd 'docker service ls'
   docker service ls
 }
 
 __view_process() {
+  __view_header "Processes"
   __become
+  __view_cmd 'docker ps'
   docker ps
 }
 
 __view_all() {
+  __view_separator
   __view_nodes
   __view_service
   __view_process
+  __view_separator
 }
 
 __run_on_all() {
   local node
   local cmd="${@}"
   for node in ${NAMES[@]}; do
+    __info "${node} -> ${cmd}"
     __become "${node}"
     eval "${cmd}"
   done

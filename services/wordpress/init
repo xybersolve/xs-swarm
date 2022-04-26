@@ -1,0 +1,9 @@
+#!/usr/bin/env bash
+
+openssl rand -base64 12 | docker secret create db_dba_pwd - || true
+openssl rand -base64 12 | docker secret create db_root_pwd - || true
+
+[[ -d /opt/docker/volumes/mysql ]] \
+  || sudo mkdir -p /opt/docker/volumes/mysql
+
+docker network create --driver overlay wp-net || true

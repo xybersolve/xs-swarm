@@ -1,0 +1,21 @@
+version: '3.3'
+
+networks:
+  traefik-net:
+    external: true
+
+services:
+  apache:
+    image: httpd:2.4
+    networks:
+    - traefik-net
+    deploy:
+      replicas: 1
+      labels:
+      #- traefik.domain=swarm.io
+      #- traefik.domain=swarm.xybersolve.io        
+      - traefik.frontend.rule=PathPrefixStrip:/apache
+      - traefik.backend=apache_apache
+      - traefik.docker.network=traefik-net
+      - traefik.port=80
+      - traefik.enable=true

@@ -4,6 +4,7 @@
 #
 declare PROJECT_DIR=~/bin/xs-swarm
 declare BIN_DIR=~/bin
+# symlibks in script bin to project scripts
 declare -A ALIASES=(
   ['sm']='swarm.machines'
   ['sn']='swarm.nodes'
@@ -12,15 +13,18 @@ declare -A ALIASES=(
 
 __copy() {
   # move project files into script bin
+  # only these are needed in the script bin
   local file=''
   local -ra files=(
     #"swarm.machines"
     #"swarm.nodes"
     #"swarm.services"
+    "aws.sh"
+    "swarm"
+    "swarm.common.sh"
     "swarm.conf.sh"
     "swarm.aws.conf.sh"
     "swarm.vbx.conf.sh"
-    "swarm.common.sh"
   )
   printf "\n"
   for file in "${files[@]}"; do
@@ -55,8 +59,33 @@ __unalias() {
 }
 
 __control() {
+  # ensure direcotry exists
   ssh control mkdir -p /home/ubuntu/bin/xs-swarm
+  # copy the entire library directory to 'control'
   scp -r ~/bin/xs-swarm/* control:/home/ubuntu/bin/xs-swarm/
+  # distribute to script bin on control
+  # do this locally (on control) for now
+  #ssh control . /home/ubuntu/bin/xs-swarm/dist --copy
+}
+
+__remote() {
+  # ./dist --remote mgr1
+  # ./dist --remote mgr1 ubuntu
+  # ./dist --remote leader ec2-user
+  local hostname="${1:?hostname is required argument}"
+  local user="${2:-ubuntu}"
+  local home="/home/${user}"
+
+  ssh "${hostname}" mkdir -p ${home}/bin/xs-swarm
+  scp -r ~/bin/xs-swarm/* ${hostname}:${home}/bin/xs-swarm/
+}
+
+__host() {
+  local hostname=${1:?hostname is required argument}
+  local username=${2:?username is required argument}
+  ssh "${hostname}" mkdir -p "/home/${username}/bin/xs-swarm"
+  scp -r ~/bin/xs-swarm/* "${hostname}:/home/${username}/bin/xs-swarm/"
+  ssh "${hostname}" "/home/${username}/bin/xs-swarm/dist --all"
 }
 
 declare FLAG=${1:-help}
@@ -77,14 +106,40 @@ case ${FLAG} in
   --control)
     __control
     ;;
-  help)
+  --remote)
+    shift
+    __remote "${@}"; exit 0; ;;
+  --host)
+    __host "${2}" "${3}"
+    ;;
+  --help)
     echo '
-    Usage
+    Usage:
+      ./dist [options]
+
+    Options:
+      --help: this
+      --copy: copy to local script bin directory
+      --alias: set aliases
+      --unalias: remove aliases
+      --all: --copy & --alias
+      --control: copy to bastion (control)
+      --host <hostname> <user>: copy to specified host
+      --remote <hostname> [user]: copy to remote, hostname required, user defaults to ubuntu
+
+    Examples
+      ./dist --help
       ./dist --copy
       ./dist --alias
       ./dist --all
       ./dist --unalias
       ./dis --control
+      ./dist --host MGR1 docker
+
+      ./dist --remote mgr1
+      ./dist --remote mgr1 ubuntu
+      ./dist --remote leader ec2-user
+
     '
     ;;
 esac

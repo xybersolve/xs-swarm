@@ -1,0 +1,35 @@
+version: '3.3'
+
+networks:
+  traefik-net:
+    external: true
+
+services:
+  nginx:
+    image: nginx:1.13-alpine
+    networks:
+    - traefik-net
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == worker]
+      update_config:
+        parallelism: 1
+        delay: 2s
+      restart_policy:
+        condition: on-failure
+      labels:
+      #- traefik.domain=swarm.io
+      #- traefik.domain=swarm.xybersolve.io
+      #- traefik.domain=aws.xybersolve.io
+      - traefik.frontend.rule=PathPrefixStrip:/nginx
+      - traefik.entryPoints=http
+      - traefik.backend=nginx_nginx
+      - traefik.docker.network=traefik-net
+      - traefik.port=80
+      - traefik.enable=true
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://swarm.io/nginx"]
+    #   interval: 1m
+    #   timeout: 5s
+    #   retries: 3

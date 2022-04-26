@@ -1,0 +1,37 @@
+version: '3'
+
+networks:
+  traffic-net:
+    driver: overlay
+
+services:
+  traefik:
+    image: traefik
+    command:
+      - --web
+      - --docker
+      - --docker.domain=docker.localhost
+      - --logLevel=DEBUG
+    ports:
+      - "80:80"
+      - "8080:8080"
+    # networks:
+    #   - traffic-net
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /dev/null:/traefik.toml
+
+  machine:
+    image: katacoda/docker-http-server
+    # networks:
+    #   - traffic-net
+    labels:
+      - "traefik.backend=machine-echo"
+      - "traefik.frontend.rule=Host:machine-echo.dev.com"
+  echo:
+    image: katacoda/docker-http-server:v2
+    # networks:
+    #   - traffic-net
+    labels:
+      - "traefik.backend=echo"
+      - "traefik.frontend.rule=Host:echo-echo.dev.com"

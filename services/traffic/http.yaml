@@ -1,0 +1,18 @@
+version: '3'
+
+services:
+  machine:
+    image: katacoda/docker-http-server
+  labels:
+    - "traefik.backend=machine-echo"
+    - "traefik.frontend.rule=Host:machine-echo.example.com"
+  machine:
+    image: katacoda/docker-http-server
+    labels:
+      - "traefik.backend=machine-echo"
+      - "traefik.frontend.rule=Host:machine-echo.example.com"
+  echo:
+    image: katacoda/docker-http-server:v2
+    labels:
+      - "traefik.backend=echo"
+      - "traefik.frontend.rule=Host:echo-echo.example.com"

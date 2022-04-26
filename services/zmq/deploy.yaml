@@ -1,44 +1,75 @@
 version: '3.1'
 
 services:
-  req:
+  requestor:
     image: xybersolve/zmq-http-req:latest
     command: npm start
-    env_file:
-      - .env
     ports:
-      - "8080:8080"
+      - "8686:8686"
     environment:
-      ZMQ_RES_ADDRESS: tcp://res:8672
-      HTTP_PORT: "8080"
+      ZMQ_RES_ADDRESS: tcp://responder:8672
+      HTTP_PORT: "8686"
     deploy:
-      replicas: 3
+      replicas: 1
       placement:
         constraints: [node.role == worker]
-    healthcheck:
-      test: ["CMD", "curl", "-f", "http://localhost:8080/ping"]
-      interval: 15s
-      timout: 5s
-      retries: 3
+    # healthcheck:
+    #   test: ["CMD", "curl", "-f", "http://localhost:8080/ping"]
+    #   interval: 15s
+    #   timout: 5s
+    #   retries: 3
+    labels:
+       - traefik.backend=requestor
+       - traefik.frontend.rule=Host:zmq.swarm.xybersolve.io
+       - traefik.docker.network=traefik-net
+       - traefik.port=8686
     networks:
-       - zmq_network
+       - zmq-net
+    #   - traefik-proxy-net
 
-  res:
+  responder:
     image: xybersolve/zmq-http-res:latest
     command: npm start
-    env_file:
-      - .env
     environment:
       ZMQ_REQ_ADDRESS: "tcp://*:8672"
       ZMQ_PORT: "8672"
     deploy:
-      replicas: 3
+      replicas: 1
       placement:
         constraints: [node.role == worker]
     networks:
-       - zmq_network
+       - zmq-net
 
 networks:
-   zmq_network:
-     driver: overlay
-#     subnet: "10.0.11.0/24"
+  zmq-net:
+    external: true
+#  traefik-proxy-net:
+#    external: true
+
+
+  # docker service create \
+  #   --name "responder" \
+  #   --replicas 4 \
+  #   --env "ZMQ_REQ_ADDRESS=tcp://*:${ZMQ_PORT}" \
+  #   --env "ZMQ_PORT=${ZMQ_PORT}" \
+  #   --network "${ZMQ_NETWORK}" \
+  #   --constraint 'node.role == worker' \
+  #   --placement-pref 'spread=node.labels.worker' \
+  #   xybersolve/zmq-http-res
+  #
+  #
+  # docker service create \
+  #   --name "requestor" \
+  #   --replicas 4 \
+  #   -p "${HTTP_PORT}:${HTTP_PORT}" \
+  #   --env "ZMQ_RES_ADDRESS=tcp://responder:${ZMQ_PORT}" \
+  #   --env "HTTP_PORT=${HTTP_PORT}" \
+  #   --network "${ZMQ_NETWORK}" \
+  #   --constraint 'node.role == worker' \
+  #   --placement-pref 'spread=node.labels.worker' \
+  #   xybersolve/zmq-http-req
+
+  #--network "${TRAEFIK_NETWORK}" \
+  #--label 'traefik.frontend=Host:zmq.swarm.xybersolve.io' \
+  # --label traefik.port=80 \
+  #--publish "${HTTP_PORT}:${HTTP_PORT}" \

@@ -1,0 +1,37 @@
+---
+version: '3.1'
+
+services:
+  db:
+    image: mysql
+    secrets:
+      - db_root_pwd
+      - db_dba_pwd
+    restart: always
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      resources:
+        reservations:
+          memory: 128M
+        limit:
+          memory: 256M
+    ports:
+      "3306:3306"
+    environment:
+      MYSQL_USER: dba
+      MYSQL_DATABASE: mydb
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_pwd
+      MYSQL_PASSWORD_FILE: /run/secrets/db_root_pwd
+    networks:
+      - wp-net
+secrets:
+  db_root_pwd:
+    external: true
+  db_dba_pwd:
+    external: true
+
+networks:
+  wp-net:
+    external: true

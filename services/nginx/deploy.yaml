@@ -1,0 +1,27 @@
+version: '3.4'
+services:
+  nginx:
+    image: nginx:latest
+    ports:
+      - "9292:80"
+    deploy:
+      replicas: 2
+      placement:
+        constraints: [node.role == worker]
+    # volumes:
+    #   - ../www:/var/www
+    #   - ./nginx/nginx.conf:/etc/nginx/conf.d/default.conf
+    #   - ../letsencrypt:/etc/letsencrypt
+    # labels:
+    #   - traefik.backend=nginx
+    #   - traefik.frontend.rule=Host:nginx.192.168.99.100
+    #   - traefik.port=80
+    #networks:
+    #  - traefik_traefik-net
+
+# networks:
+#   traefik_traefik-net:
+#     external: true
+
+
+#@docker run --name nginx-vanilla -p 8080:80 -d nginx

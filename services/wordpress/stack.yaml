@@ -1,0 +1,53 @@
+---
+version: '3.1'
+
+services:
+  db:
+    image: mysql
+    secrets:
+      - db_root_pwd
+      - db_dba_pwd
+    restart: always
+    deploy:
+      replicas: 1
+      placement:
+        constraints: [node.role == manager]
+      resources:
+        reservations:
+          memory: 128M
+        limits:
+          memory: 256M
+    ports:
+      - "3306:3306"
+    environment:
+      MYSQL_USER: dba
+      MYSQL_DATABASE: mydb
+      MYSQL_ROOT_PASSWORD_FILE: /run/secrets/db_root_pwd
+      MYSQL_PASSWORD_FILE: /run/secrets/db_root_pwd
+    networks:
+      - wp-net
+    volumes:
+      - "/var/run/docker.sock:/var/run/docker.sock"
+      - "/opt/docker/volumes/mysql:/var/lib/mysql"
+secrets:
+  db_root_pwd:
+    external: true
+  db_dba_pwd:
+    external: true
+
+networks:
+  wp-net:
+    external: true
+
+
+
+
+    # volumes:
+    #   - "data_vol:/data"
+    # deploy:
+    #   mode: replicated
+    #   replicas: 2
+
+# volumes:
+#   data_vol:
+#     driver: "cloudstor:aws"

@@ -60,11 +60,12 @@ declare -r SYNTAX=$(cat <<EOF
       --help:  help and usage
       --version: show version info
 
-      --viz-up: start vizualizer
-      --viz-down: stop vizualizer
+      --vis-up: start vizualizer
+      --vis-down: stop vizualizer
 
       --up=<name> <parameters>: service up
       --down=<name>: service down
+      --service-down <service> [network] [volume]:
       --list: list all services
       --log=<name>: attach to service log
       --inspect=<name>: inspect service
@@ -80,9 +81,9 @@ declare -r SYNTAX=$(cat <<EOF
 
     Examples:
       Service:
-        ${PROGNAME} --viz-up
-        ${PROGNAME} --viz-down
-        ${PROGNAME} --viz-open
+        ${PROGNAME} --vis-up
+        ${PROGNAME} --vis-down
+        ${PROGNAME} --vis-open
 
         ${PROGNAME} --portainer-up
         ${PROGNAME} --portainer-down
@@ -96,6 +97,11 @@ declare -r SYNTAX=$(cat <<EOF
         ${PROGNAME} --zmq-ping
         ${PROGNAME} --zmq-inc
         ${PROGNAME} --zmq-open
+        ${PROGNAME} --zmq-update
+
+        ${PROGNAME} --traefik-up
+        ${PROGNAME} --traefik-down
+        ${PROGNAME} --test zmq.traefik
 
         ${PROGNAME} --up=nginx --name=my-nginx -p 8080:80 --constraint=node.role==worker
         ${PROGNAME} --down=my-nginx
@@ -125,11 +131,8 @@ EOF
 )
 # files & directories
 declare -r SCRIPT_DIR="$( dirname ${0} )"
-#declare -r CONFIG_FILE="${SCRIPT_DIR}/swarm.conf.sh"
-#declare -r CONFIG_FILE="${SCRIPT_DIR}/swarm.aws.conf.sh"
-declare -r CONFIG_FILE="${SCRIPT_DIR}/swarm.vbx.conf.sh"
+declare -r CONFIG_FILE="${SCRIPT_DIR}/swarm.conf.sh"
 declare -r COMMON_FILE="${SCRIPT_DIR}/swarm.common.sh"
-#declare -r MACHINE_CONFIG_FILE=${SCRIPT_DIR}/swarm.aws.conf.sh
 
 # actions
 # service actions
@@ -160,7 +163,8 @@ declare NAME='my-nginx'
 declare IMAGE='nginx'
 declare PORT='80:80'
 declare NETWORK='web-network'
-declare ZMQ_NETWORK='zmq-backend'
+
+declare ZMQ_NETWORK='zmq-net'
 
 declare ZMQ_PORT='8672'
 declare HTTP_PORT='8686'
@@ -168,6 +172,16 @@ declare HTTP_PORT='8686'
 # load
 declare CALLS=1000
 declare CONCURRENT=4
+
+# Wordpress
+declare -r WP_NETWORK=wp-net
+declare -r WP_DATA_VOLUME=wp-data
+declare -r WP_DB_VOLUME=wp-db-data
+
+declare -r WP_USER=grimble
+declare -r WP_DB_PWD=iAreThoseWho*73
+declare -r DB_ROOT_PWD=weAreTheyThat*73
+
 
 # ---------------------------------------
 # COMMON FUNCTIONS
@@ -208,7 +222,7 @@ source "${CONFIG_FILE}" \
 # defined in swarm.conf.sh
 declare -r MACHINE_CONFIG_FILE=${SCRIPT_DIR}/swarm.${MACHINE_TYPE_TO_USE}.conf.sh
 source "${MACHINE_CONFIG_FILE}" \
-  && echo "Loaded machine config file: ${MACHINE_CONFIG_FILE}" \
+  && echo "Using config: ${MACHINE_CONFIG_FILE}" \
   || die "Unable to load config file: ${MACHINE_CONFIG_FILE}" 1
 
 source "${COMMON_FILE}" \
@@ -227,19 +241,17 @@ __check_service_name() {
   [[ -z "${SERVICE_NAME}" ]] && die "${func}: service name is required" 4
 }
 
-__create_network() {
-  docker network create --driver overlay backend
-}
-
-__up() {
-  __become
-  #__nginx_up
-}
-
+#
+# Take down 'service' and 'network' (optionally)
+#
 __down() {
-  __check_service_name "__down"
+  local service="${1:?service argument is required}"
+  local network="${2:-}"
   __become
-  docker service rm "${SERVICE_NAME}"
+  docker service rm "${service}"
+
+  [[ -n "${network}" ]] \
+    && docker network rm "${network}"
 }
 
 __list() {
@@ -258,15 +270,6 @@ __process() {
   __become
   docker service ps "${SERVICE_NAME}"
 }
-
-# __run_on_all() {
-#   local node
-#   local cmd="${@}"
-#   for node in ${NAMES[@]}; do
-#     __become "${node}"
-#     eval "${cmd}"
-#   done
-# }
 
 __scale() {
   __check_service_name "__scale"
@@ -396,6 +399,9 @@ __stack_deploy() {
   docker stack deploy --compose-file ${STACK_FILE} ${STACK_NAME}
 }
 
+# **********************************************
+#  Application Services
+#
 #
 # Simple Nginx
 #
@@ -406,35 +412,30 @@ __stack_deploy() {
 
 __nginx_up() {
   __become
-  docker network create --driver overlay nginxoverlay || true
+  #docker network create --driver overlay nginx-net || true
   docker service create \
     --name my-nginx \
     --replicas 3 \
-    --network nginxoverlay \
-    -p "8080:80" \
+    --network nginx-net \
+    -p "8383:80" \
     nginx:latest
 }
 
 __nginx_down() {
   __become
   docker service rm my-nginx
-  docker network rm nginxoverlay
+  #docker network rm nginx-net
 }
 #
 #  ZeroMQ Services
 #
-__create_zmq_network() {
+__zmq_network_up() {
   __become
-  docker network create \
-    --driver=overlay \
-    ${ZMQ_NETWORK} || true
-
-# --subnet=10.0.11.0/24 \
-
+  docker network create -d overlay ${ZMQ_NETWORK} || true
 }
 
 __zmq_up() {
-  __create_zmq_network
+  __zmq_network_up
   __zmq_res_up
   __zmq_req_up
 }
@@ -449,11 +450,12 @@ __zmq_res_up() {
   __become
   docker service create \
     --name "responder" \
-    --replicas 3 \
+    --replicas 1 \
     --env "ZMQ_REQ_ADDRESS=tcp://*:${ZMQ_PORT}" \
     --env "ZMQ_PORT=${ZMQ_PORT}" \
     --network "${ZMQ_NETWORK}" \
     --constraint 'node.role == worker' \
+    --placement-pref 'spread=node.labels.worker' \
     xybersolve/zmq-http-res
 
     #--publish "${ZMQ_PORT}:${ZMQ_PORT}" \
@@ -461,19 +463,31 @@ __zmq_res_up() {
 
 __zmq_req_up() {
   __become
+  # 8686:8686
   docker service create \
     --name "requestor" \
-    --replicas 3 \
+    --replicas 1 \
     -p "${HTTP_PORT}:${HTTP_PORT}" \
     --env "ZMQ_RES_ADDRESS=tcp://responder:${ZMQ_PORT}" \
     --env "HTTP_PORT=${HTTP_PORT}" \
     --network "${ZMQ_NETWORK}" \
     --constraint 'node.role == worker' \
+    --placement-pref 'spread=node.labels.worker' \
+    --label traefik.port=${HTTP_PORT} \
+    --label traefik.enabled=true \
+    --label traefik.frontend.rule="Host:zmq.swarm.xybersolve.io" \
+    --label traefik.docker.network=${TRAEFIK_NETWORK} \
     xybersolve/zmq-http-req
 
+
+  #--network "${TRAEFIK_NETWORK}" \
+  #--label 'traefik.frontend=Host:zmq.swarm.xybersolve.io' \
+  # --label traefik.port=80 \
   #--publish "${HTTP_PORT}:${HTTP_PORT}" \
 }
 
+
+# docker service create --name vote --replicas 5 --label traefik.port=80 --network frontend instavote/vote
 __zmq_res_down() {
   docker service rm responder
 }
@@ -514,32 +528,114 @@ __zmq_stack_down() {
   docker stack rm ${zmq_stack}
 }
 
+__gmp_up() {
+  :
+}
+
+__wp_network_up() {
+  docker network rm "${WP_NETWORK}" || true
+  docker network create --driver=overlay "${WP_NETWORK}"  || true
+  return 0
+}
+
+__wp_vol_up() {
+  docker volume create "${WP_DATA_VOLUME}" || true
+  return 0
+  # docker volume create --driver local \
+  #   --opt type=nfs \
+  #   --opt o=addr=fs-ffcda356.efs.us-west-2.amazonaws.com,rw \
+  #   --opt device=:/mnt/efs/wprdpress \
+  #   wordpress_data || true
+}
+
+__wp_db_vol_up() {
+  docker volume create "${WP_DB_VOLUME}"
+  # docker volume create --driver local \
+  #   --opt type=nfs \
+  #   --opt o=addr=fs-ffcda356.efs.us-west-2.amazonaws.com,rw \
+  #   --opt device=:/mnt/efs/wprdpress \
+  #   wordpress_data || true
+
+}
+
+__wp_up() {
+  __wp_network_up
+  __wp_vol_up
+
+  docker service create \
+    --name wordpress \
+    --constraint=node.role==worker \
+    --replicas 1 \
+    --network wordpress-net \
+    --publish 8282:80 \
+    -e WORDPRESS_DB_USER="${WP_USER}" \
+    -e WORDPRESS_DB_PASSWORD="${WP_DB_PWD}" \
+    -e WORDPRESS_DB_HOST=mariadb \
+    -e WORDPRESS_DB_NAME=wordpress \
+    wordpress:4.9.6
+
+}
+
+# WP_DB_PWD=iAreThoseWho*73
+# DB_ROOT_PWD=weAreTheyThat*73
+# WP_USER=grimble
+__wp_db_up() {
+
+  __wp_network_up
+
+  docker service create \
+      --name mariadb \
+      --replicas 1 \
+      --constraint=node.role==manager \
+      --network wp-net \
+      -e MYSQL_ROOT_PASSWOR="${DB_ROOT_PWD}" \
+      -e MYSQL_PASSWORD="${WP_DB_PWD}" \
+      -e MYSQL_USER="${WP_USER}" \
+      -e MYSQL_DATABASE=wordpress \
+      mariadb:10.1
+
+  # docker service create
+  #   --name "mysql" \
+  #   --replicas 1 \
+  #   --constraint 'node.role == manager' \
+  #   -p "3306:3306" \
+  #   --network "wordpress-net" \
+  #   mysql:5.7
+
+  # mysql:5.7
+  # environment:
+  #   MYSQL_ROOT_PASSWORD: qwerty
+  # volumes:
+  #   - "my-datavolume:/var/lib/mysql"
+}
+
+
+__secret() {
+  local name="${1}"
+  local value="${2}"
+  echo "${value}" | docker secret create "${name}"
+}
+
 #
 # gmilligan website
 #
-__gmilligan_net() {
-  docker network create --driver=overlay gmilligan-net || true
-}
-
 __gmilligan_up() {
-  #docker stack deploy
-  __gmilligan_net
+
+  __become
+
+  docker network create --driver=overlay gmilligan-net || true
 
   docker service create \
     --name "gmilligan" \
     --replicas 2 \
     -p "80:80" \
     --constraint 'node.role == worker' \
+    --placement-pref 'spread=node.labels.worker' \
     --network gmilligan-net \
     xybersolve/gmilligan.web:latest
 }
-
-__gmilligan_down() {
-  docker service rm gmilligan || true
-  docker network rm gmilligan-net
-}
-
-
+# **********************************************
+# Shared Service Providers
 #
 #  Swarm Visualizer service
 #
@@ -551,20 +647,16 @@ __visualizer_up() {
     --constraint=node.role==manager \
     --mount=type=bind,src=/var/run/docker.sock,dst=/var/run/docker.sock \
     dockersamples/visualizer
-
 }
 
-__visualizer_down() {
-  __become
-  docker service stop vizualizer
-  docker service rm vizualizer
-}
 #
 # Portainer
 #
 __portainer_up() {
   __become
-  docker volume create portainer_data
+
+  docker volume create portainer_data || true
+
   docker service create \
   --name portainer \
   --publish 9000:9000 \
@@ -573,30 +665,62 @@ __portainer_up() {
   --mount type=bind,src=//var/run/docker.sock,dst=/var/run/docker.sock \
   --mount type=volume,src=portainer_data,dst=/data \
   portainer/portainer \
-  -H unix:///var/run/docker.sock
-
-  # docker service create \
-  #   --name portainer \
-  #   --publish 9000:9000 \
-  #   --replicas=1 \
-  #   --constraint 'node.role == manager' \
-  # portainer/portainer
-#--mount type=bind,src=//Users/Greg/bin/xs-swarm/portainer/data,dst=/data \
-# docker run -d -p 9000:9000 -v /var/run/docker.sock:/var/run/docker.sock -v portainer_data:/data portainer/portainer
-}
-
-__portainer_down() {
-  __become
-  docker service rm portainer
+    -H unix:///var/run/docker.sock
 }
 
 __portainer_open() {
   local ip=$( __ip )
   open "http://${ip}:9000"
 }
+#
+# Traefik Service
+#
+declare TRAEFIK_NETWORK='traefik-net'
+__traefik_network_up() {
+  docker network create --driver overlay --attachable "${TRAEFIK_NETWORK}" || true
+}
 
-#*********************************
-# External
+__traefik_up() {
+  __become
+
+  __traefik_network_up
+
+  docker service create \
+    --name traefik \
+    --constraint=node.role==manager \
+    --publish 80:80 \
+    --publish 8080:8080 \
+    --mount type=bind,source=/var/run/docker.sock,target=/var/run/docker.sock \
+    --network "${TRAEFIK_NETWORK}" \
+    traefik:latest \
+      --docker \
+      --docker.swarmMode \
+      --docker.domain=traefik \
+      --docker.watch \
+      --api
+}
+
+__whoami_up() {
+
+  __become
+
+  docker service create \
+    --name whoami \
+    --label traefik.port=80 \
+    --network "${TRAEFIK_NETWORK}" \
+    emilevauge/whoami
+}
+#
+#  End Traefik Services
+#
+
+__test() {
+  local domain="${1:?domain is required}"
+  curl -H Host:${domain} http://$(docker-machine ip mgr1)
+}
+
+# **********************************************
+# External Routines
 #
 __open() {
   local ip=$(docker-machine ip ${NAMES[0]})
@@ -618,6 +742,7 @@ __load() {
   ab -n ${CALLS} -c ${CONCURRENT} http://${ip}:${PORT}/
 }
 
+# **********************************************
 #
 # DOCUMENTATION & REFERENCE
 #
@@ -692,7 +817,9 @@ __clean_task_history() {
   docker service scale my-nginx=5
 }
 
-
+# **********************************************
+# Argument options parser & dispatcher
+#
 __get_opts() {
   while (( $# > 0 )); do
     local arg="${1}"; shift;
@@ -701,18 +828,7 @@ __get_opts() {
       --version) show_version             ;;
       # services
       # TODO: setup for multiple or named services
-      --network)
-        __create_network
-        exit 0
-        ;;
-      --up*)
-        [[ ${arg} =~ '=' ]] && SERVICE_NAME="${arg#*=}"
-        UP=${TRUE}
-        ;;
-      --down*)
-        DOWN=${TRUE}
-        [[ ${arg} =~ '=' ]] && SERVICE_NAME="${arg#*=}"
-        ;;
+      --down) __down "${@}"; exit 0; ;;
       --list)
         LIST=${TRUE}
         ;;
@@ -726,16 +842,11 @@ __get_opts() {
         ;;
       --ps*)
         [[ ${arg} =~ '=' ]] && SERVICE_NAME="${arg#*=}"
-        __process
-        exit 0;
-        ;;
+        __process; exit 0; ;;
       --watch)
         WATCH=${TRUE}
         ;;
-      --status)
-        __update_status
-        exit 0
-        ;;
+      --status) __update_status; exit 0; ;;
       --drill-down*|--dd*)
         DRILL_DOWN=${TRUE}
         [[ ${arg} =~ '=' ]] && SERVICE_NAME="${arg#*=}"
@@ -769,6 +880,8 @@ __get_opts() {
         [[ ${arg} =~ '=' ]] && CMD="${arg#*=}"
         ;;
 
+      --test)
+        __test "${@}" ; exit 0; ;;
       # shared across modules
       # an entry in each
       --run-on-all*)
@@ -799,41 +912,35 @@ __get_opts() {
         [[ ${arg} =~ '=' ]] && REPLICAS="${arg#*=}"
         __service_scale
         ;;
-      # gmilligan
-      --gmilligan-up)
-        __gmilligan_up; exit 0; ;;
 
-      --gmilligan-down)
-        __gmilligan_down; exit 0; ;;
+      # GLOBAL SERVICES
+      # traefik
+      --traefik-up) __traefik_up; exit 0; ;;
+      --traefik-down) __down 'traefik' 'traefik-net'; exit 0; ;;
+      --whoami-up) __whoami_up; exit 0; ;;
+      --whoami-down) __down 'whoami'; exit 0; ;;
 
-      # nginx
-      --nginx-up)
-        __nginx_up; exit 0; ;;
-      --nginx-down)
-        __nginx_down; exit 0; ;;
-      --nginx-open)
-        __nginx_open; exit 0; ;;
 
       # visualizer
-      --vis-up)
-        __visualizer_up; exit 0;
-        ;;
-      --vis-down)
-        __visualizer_down; exit 0;
-        ;;
-      --vis-open)
-        __vis_open; exit 0;
-        ;;
+      --vis-up) __visualizer_up; exit 0; ;;
+      --vis-down) __down 'visualizer' ; exit 0; ;;
+      --vis-open) __vis_open; exit 0; ;;
 
       # portainer
-      --portainer-up)
-        __portainer_up; exit 0; ;;
-      --portainer-down)
-        __portainer_down; exit 0; ;;
-      --portainer-open)
-        __portainer_open; exit 0; ;;
+      --portainer-up) __portainer_up; exit 0; ;;
+      --portainer-down) __down 'portainer'; exit 0; ;;
+      --portainer-open) __portainer_open; exit 0; ;;
 
-      # zeromq-req-res 
+      # gmilligan
+      --gmilligan-up) __gmilligan_up; exit 0; ;;
+      --gmilligan-down) __down 'gmilligan' 'gmilligan-net' ; exit 0; ;;
+
+      # nginx
+      --nginx-up) __nginx_up; exit 0; ;;
+      --nginx-down) __nginx_down; exit 0; ;;
+      --nginx-open) __nginx_open; exit 0; ;;
+
+      # zeromq-req-res
       --res-up) __zmq_res_up; exit 0; ;;
       --req-up) __zmq_req_up; exit 0; ;;
       --req-down) __zqm_req_down; exit 0; ;;
@@ -844,18 +951,10 @@ __get_opts() {
       --zmq-open) __zmq_open; exit 0; ;;
 
       # zeromq req-res=http compose
-      --zmq-stack-up)
-        __zmq_compose_up
-        exit 0
-        ;;
-      --zmq-stack-down)
-        __zmq_compose_down
-        exit 0
-        ;;
-      --zmq-stack-prune)
-        __zqm_stack_prune
-        exit 0
-        ;;
+      --zmq-stack-up) __zmq_compose_up; exit 0; ;;
+      --zmq-stack-down) __zmq_compose_down; exit 0; ;;
+      --zmq-stack-prune) __zqm_stack_prune; exit 0; ;;
+
       # external
       --open*)
         OPEN=${TRUE}
@@ -876,6 +975,14 @@ __get_opts() {
         __ip
         ;;
 
+      --secret) __secret "${@}"; exit 0;  ;;
+
+      --wp-db-up) __wp_db_up; exit 0; ;;
+      --wp-db-down) __down 'mariadb' ; exit 0; ;;
+      --wp_up) __wp_up; exit 0; ;;
+      --wp_down) __down 'wordpress' ; exit 0; ;;
+
+
       *) die "Unknown option: ${arg}" ;;
    esac
   done
@@ -886,8 +993,6 @@ __dispatch() {
   # __allocate_nodes
 
   # service
-  (( UP )) && __up
-  (( DOWN )) && __down
   (( INSPECT )) && __inspect
   (( LOG )) && __log
   (( LIST )) && __list

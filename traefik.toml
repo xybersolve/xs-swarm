@@ -1,0 +1,9 @@
+[entryPoints]
+  [entryPoints.http]
+  address = ":80"
+
+[docker]
+swarmmode = true
+watch = true
+exposedbydefault = false
+domain = "traefik.local"

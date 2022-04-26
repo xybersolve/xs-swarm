@@ -1,0 +1,35 @@
+version: "3.3"
+
+networks:
+  traefik-net:
+    external: true
+
+configs:
+  traefik.toml:
+    file: ./configs/traefik.toml
+
+services:
+  traefik:
+    image: rancher/socat-docker
+    networks:
+      - socat-net
+      - traefik-net
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+    deploy:
+      mode: replicated
+      replicas: 1
+      update_config:
+        delay: 2s
+      placement:
+        constraints: [node.role==manager]
+      restart_policy:
+        condition: on-failure
+        max_attempts: 3
+      resources:
+        limits:
+          cpus: '0.33'
+          memory: 128M
+        reservations:
+          cpus: '0.05'
+          memory: 64M
